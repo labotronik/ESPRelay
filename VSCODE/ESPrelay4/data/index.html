@@ -53,6 +53,7 @@
     <div class="tab" data-tab="prog">Programmation</div>
     <div class="tab" data-tab="json">JSON</div>
     <div class="tab" data-tab="net">Réseau</div>
+    <div class="tab" data-tab="backup">Backup</div>
   </div>
 
   <!-- DASHBOARD -->
@@ -61,10 +62,10 @@
       <div class="card" style="flex:1;min-width:320px">
         <h3>Entrées</h3>
         <div id="inputsView" class="inline">...</div>
-        <div class="sep"></div>
-        <div class="muted">E1..E4 = IO4..IO7</div>
       </div>
+    </div>
 
+    <div class="row" style="margin-top:12px;">
       <div class="card" style="flex:1;min-width:320px">
         <h3>Relais</h3>
         <div id="relaysView">...</div>
@@ -265,7 +266,7 @@
         <span class="muted">User</span>
         <input id="mqtt_user" type="text" placeholder="">
         <span class="muted">Pass</span>
-        <input id="mqtt_pass" type="text" placeholder="">
+        <input id="mqtt_pass" type="password" placeholder="">
       </div>
 
       <div class="inline" style="margin-top:8px;">
@@ -288,6 +289,23 @@
       <button class="primary" onclick="saveMqtt()">Sauver MQTT</button>
       <span class="muted" id="mqtt_hint"></span>
     </div>
+
+  </div>
+
+  <!-- BACKUP -->
+  <div id="tab-backup" class="hide">
+    <div class="card" style="max-width:640px;">
+      <h3>Backup / Restore</h3>
+      <div class="muted">Exporter ou importer toute la configuration (règles + réseau + MQTT).</div>
+      <div class="sep"></div>
+      <div class="inline">
+        <button class="primary" onclick="downloadBackup()">Télécharger backup</button>
+        <span id="backup_status" class="muted"></span>
+        <button class="small" onclick="document.getElementById('backup_file').click()">Importer backup</button>
+        <input id="backup_file" type="file" accept="application/json" style="display:none">
+      </div>
+      <div class="muted" style="margin-top:8px;">Importer peut changer l’IP. Recharge la page si besoin.</div>
+    </div>
   </div>
 
 <script>
@@ -308,7 +326,7 @@ function toast(text, ok=true){
   setTimeout(()=>{ m.textContent=""; m.className=""; }, 1800);
 }
 function switchTab(name){
-  for(const t of ["dash","prog","json","net"]){
+  for(const t of ["dash","prog","json","net","backup"]){
     $("tab-"+t).classList.toggle("hide", t!==name);
     document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
   }
@@ -339,6 +357,8 @@ const getNet = ()=>apiJson("/api/net");
 const putNet = (body)=>apiJson("/api/net",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const getMqtt = ()=>apiJson("/api/mqtt");
 const putMqtt = (body)=>apiJson("/api/mqtt",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const getBackup = ()=>apiJson("/api/backup");
+const putBackup = (body)=>apiJson("/api/backup",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 
 // -------- data model --------
 let rules = null;
@@ -811,6 +831,47 @@ async function saveMqtt(){
 
 ["mqtt_enabled","mqtt_host","mqtt_port","mqtt_user","mqtt_pass","mqtt_client","mqtt_base","mqtt_disc","mqtt_retain"]
   .forEach(id => $(id).addEventListener("input", ()=>{ mqttDirty = true; }));
+
+// -------- Backup / Restore --------
+async function downloadBackup(){
+  try{
+    $("backup_status").textContent = "";
+    const data = await getBackup();
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "esprelay4-backup.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  }catch(e){
+    toast(e.message, false);
+  }
+}
+
+$("backup_file").addEventListener("change", async (ev)=>{
+  const f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+  try{
+    const text = await f.text();
+    const json = JSON.parse(text);
+    const res = await putBackup(json);
+    if(res && res.reboot){
+      $("backup_status").textContent = "Import OK, redémarrage…";
+    } else {
+      $("backup_status").textContent = "Import OK";
+    }
+    await loadRules();
+    await loadNet();
+    await loadMqtt();
+  }catch(e){
+    toast(e.message, false);
+    $("backup_status").textContent = "Import échoué";
+  } finally {
+    ev.target.value = "";
+  }
+});
 
 async function loadRules(){
   try{

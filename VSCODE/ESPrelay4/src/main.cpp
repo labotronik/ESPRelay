@@ -1161,6 +1161,93 @@ static void sendJsonMqttCfg(EthernetClient& c){
   sendText(c, out, "application/json");
 }
 
+static void sendJsonBackup(EthernetClient& c){
+  loadNetCfg();
+  loadMqttCfg();
+
+  DynamicJsonDocument doc(6144);
+  doc["rules"] = rulesDoc;
+
+  JsonObject net = doc.createNestedObject("net");
+  net["mode"] = netCfg.dhcp ? "dhcp" : "static";
+  net["ip"] = netCfg.ip.toString();
+  net["gw"] = netCfg.gw.toString();
+  net["sn"] = netCfg.sn.toString();
+  net["dns"] = netCfg.dns.toString();
+
+  JsonObject mq = doc.createNestedObject("mqtt");
+  mq["enabled"] = mqttCfg.enabled ? 1 : 0;
+  mq["host"] = mqttCfg.host;
+  mq["port"] = mqttCfg.port;
+  mq["user"] = mqttCfg.user;
+  mq["pass"] = mqttCfg.pass;
+  mq["client_id"] = mqttCfg.clientId;
+  mq["base"] = mqttCfg.base;
+  mq["discovery_prefix"] = mqttCfg.discoveryPrefix;
+  mq["retain"] = mqttCfg.retain ? 1 : 0;
+
+  String out; serializeJson(doc, out);
+  sendText(c, out, "application/json");
+}
+
+static bool applyNetFromJson(JsonObject o, String &err) {
+  const char* mode = o["mode"] | "static";
+  bool dhcp = (strcmp(mode, "dhcp") == 0);
+  if(!(dhcp || strcmp(mode, "static")==0)){
+    err = "net.mode must be dhcp|static";
+    return false;
+  }
+
+  if(!dhcp){
+    IPAddress ip, gw, sn, dns;
+    bool ok = true;
+    const char* ipStr = o["ip"] | "";
+    const char* gwStr = o["gw"] | "";
+    const char* snStr = o["sn"] | "";
+    const char* dnsStr = o["dns"] | "";
+    ok &= parseIp(String(ipStr), ip);
+    ok &= parseIp(String(gwStr), gw);
+    ok &= parseIp(String(snStr), sn);
+    ok &= parseIp(String(dnsStr), dns);
+    if(!ok){
+      err = "net invalid ip fields";
+      return false;
+    }
+    netCfg.ip = ip;
+    netCfg.gw = gw;
+    netCfg.sn = sn;
+    netCfg.dns = dns;
+  }
+
+  netCfg.dhcp = dhcp;
+  if(!saveNetCfg()){
+    err = "net fs write failed";
+    return false;
+  }
+  applyNetCfg();
+  return true;
+}
+
+static bool applyMqttFromJson(JsonObject o, String &err) {
+  mqttCfg.enabled = (o["enabled"] | 0) ? true : false;
+  mqttCfg.host = String((const char*)(o["host"] | "192.168.1.43"));
+  mqttCfg.port = (uint16_t)(o["port"] | 1883);
+  mqttCfg.user = String((const char*)(o["user"] | ""));
+  mqttCfg.pass = String((const char*)(o["pass"] | ""));
+  mqttCfg.clientId = String((const char*)(o["client_id"] | "ESPRelay4"));
+  mqttCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "esprelay4")));
+  mqttCfg.discoveryPrefix = String((const char*)(o["discovery_prefix"] | "homeassistant"));
+  mqttCfg.retain = (o["retain"] | 1) ? true : false;
+
+  if(!saveMqttCfg()){
+    err = "mqtt fs write failed";
+    return false;
+  }
+  mqttSetup();
+  mqttAnnounced = false;
+  return true;
+}
+
 static void sendJsonRules(EthernetClient& c){
   String out;
   serializeJsonPretty(rulesDoc, out);
@@ -1285,6 +1372,9 @@ static void handleHttp(){
   else if(method=="GET" && path=="/api/mqtt"){
     sendJsonMqttCfg(client);
   }
+  else if(method=="GET" && path=="/api/backup"){
+    sendJsonBackup(client);
+  }
   else if(method=="PUT" && path=="/api/net"){
     String body = readBody(client, contentLen);
     DynamicJsonDocument tmp(256);
@@ -1351,6 +1441,46 @@ static void handleHttp(){
         mqttSetup();
         mqttAnnounced = false;
         sendText(client, String("{\"ok\":true,\"applied\":true}"), "application/json");
+      }
+    }
+  }
+  else if(method=="PUT" && path=="/api/backup"){
+    String body = readBody(client, contentLen);
+    DynamicJsonDocument tmp(6144);
+    auto err = deserializeJson(tmp, body);
+    if(err){
+      sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
+    } else {
+      if(!tmp["rules"].is<JsonObject>() || !tmp["net"].is<JsonObject>() || !tmp["mqtt"].is<JsonObject>()){
+        sendText(client, String("{\"ok\":false,\"error\":\"backup must contain rules, net, mqtt\"}"), "application/json", 400);
+      } else {
+        String msg;
+        DynamicJsonDocument rulesTmp(3072);
+        rulesTmp.set(tmp["rules"]);
+        if(!validateAndApplyRulesDoc(rulesTmp, msg)){
+          DynamicJsonDocument e(256);
+          e["ok"]=false; e["error"]=msg;
+          String out; serializeJson(e,out);
+          sendText(client, out, "application/json", 400);
+        } else {
+          rulesDoc.clear();
+          rulesDoc.set(rulesTmp);
+          rebuildRuntimeFromRules();
+          if(!saveRulesToFS(rulesDoc)){
+            sendText(client, String("{\"ok\":false,\"error\":\"rules fs write failed\"}"), "application/json", 500);
+          } else {
+            String errMsg;
+            if(!applyNetFromJson(tmp["net"].as<JsonObject>(), errMsg)){
+              sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+            } else if(!applyMqttFromJson(tmp["mqtt"].as<JsonObject>(), errMsg)){
+              sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+            } else {
+              sendText(client, String("{\"ok\":true,\"applied\":true,\"reboot\":true}"), "application/json");
+              delay(200);
+              ESP.restart();
+            }
+          }
+        }
       }
     }
   }
