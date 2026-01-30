@@ -2602,173 +2602,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Diode:MRA4003T3G"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "D"
-				(at 0 2.54 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "MRA4003T3G"
-				(at 0 -2.54 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" "Diode_SMD:D_SMA"
-				(at 0 -4.445 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "http://www.onsemi.com/pub_link/Collateral/MRA4003T3-D.PDF"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "300V, 1A, General Purpose Rectifier Diode, SMA(DO-214AC)"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Sim.Device" "D"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Sim.Pins" "1=K 2=A"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_keywords" "diode"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_fp_filters" "D*SMA*"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "MRA4003T3G_0_1"
-				(polyline
-					(pts
-						(xy -1.27 1.27) (xy -1.27 -1.27)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 1.27) (xy 1.27 -1.27) (xy -1.27 0) (xy 1.27 1.27)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 0) (xy -1.27 0)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "MRA4003T3G_1_1"
-				(pin passive line
-					(at -3.81 0 0)
-					(length 2.54)
-					(name "K"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 3.81 0 180)
-					(length 2.54)
-					(name "A"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "Diode:SM6T6V8A"
 			(pin_numbers
 				(hide yes)
@@ -3439,6 +3272,265 @@
 						)
 					)
 					(number "10"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "Jumper:SolderJumper_3_Bridged12"
+			(pin_names
+				(offset 0)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom no)
+			(on_board yes)
+			(property "Reference" "JP"
+				(at -2.54 -2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "SolderJumper_3_Bridged12"
+				(at 0 2.794 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" "~"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description" "3-pole Solder Jumper, pins 1+2 closed/bridged"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_keywords" "Solder Jumper SPDT"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_fp_filters" "SolderJumper*Bridged12*"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "SolderJumper_3_Bridged12_0_1"
+				(polyline
+					(pts
+						(xy -2.54 0) (xy -2.032 0)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -1.016 1.016) (xy -1.016 -1.016)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start -1.016 0.508)
+					(end -0.508 -0.508)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(arc
+					(start -1.016 -1.016)
+					(mid -2.0276 0)
+					(end -1.016 1.016)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(arc
+					(start -1.016 -1.016)
+					(mid -2.0276 0)
+					(end -1.016 1.016)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(rectangle
+					(start -0.508 1.016)
+					(end 0.508 -1.016)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 -1.27) (xy 0 -1.016)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(arc
+					(start 1.016 1.016)
+					(mid 2.0276 0)
+					(end 1.016 -1.016)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(arc
+					(start 1.016 1.016)
+					(mid 2.0276 0)
+					(end 1.016 -1.016)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type outline)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.016 1.016) (xy 1.016 -1.016)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 2.54 0) (xy 2.032 0)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "SolderJumper_3_Bridged12_1_1"
+				(pin passive line
+					(at -5.08 0 0)
+					(length 2.54)
+					(name "A"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 2.54)
+					(name "C"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 0 180)
+					(length 2.54)
+					(name "B"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -5910,12 +6002,6 @@
 		(uuid "2b1ed59d-aca3-486f-809b-cd8e83d864dc")
 	)
 	(junction
-		(at 163.83 116.84)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "2e0ab664-e5a3-444f-a4f0-898bb6e9dd96")
-	)
-	(junction
 		(at 44.45 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -6004,12 +6090,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "b40abd63-6158-4a9b-aade-9904f98ffa05")
-	)
-	(junction
-		(at 153.67 110.49)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b8bf3933-3ab5-4f64-8a8e-46e978c6bc69")
 	)
 	(junction
 		(at 26.67 64.77)
@@ -6151,7 +6231,7 @@
 	)
 	(wire
 		(pts
-			(xy 147.32 102.87) (xy 147.32 119.38)
+			(xy 142.24 102.87) (xy 142.24 119.38)
 		)
 		(stroke
 			(width 0)
@@ -6321,7 +6401,7 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 119.38) (xy 147.32 119.38)
+			(xy 137.16 119.38) (xy 142.24 119.38)
 		)
 		(stroke
 			(width 0)
@@ -6521,7 +6601,7 @@
 	)
 	(wire
 		(pts
-			(xy 147.32 102.87) (xy 153.67 102.87)
+			(xy 142.24 102.87) (xy 153.67 102.87)
 		)
 		(stroke
 			(width 0)
@@ -6601,16 +6681,6 @@
 	)
 	(wire
 		(pts
-			(xy 153.67 116.84) (xy 153.67 110.49)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "40b393f9-2b4a-4c11-b0a1-e9220fb728f8")
-	)
-	(wire
-		(pts
 			(xy 72.39 187.96) (xy 63.5 187.96)
 		)
 		(stroke
@@ -6658,6 +6728,16 @@
 			(type default)
 		)
 		(uuid "4a434880-9025-45b7-a5c1-32dceefdcd0d")
+	)
+	(wire
+		(pts
+			(xy 124.46 138.43) (xy 124.46 139.7)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4e85645e-f501-44d9-ad35-94c0a09f8418")
 	)
 	(wire
 		(pts
@@ -6741,16 +6821,6 @@
 	)
 	(wire
 		(pts
-			(xy 132.08 129.54) (xy 134.62 129.54)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "587d53e3-73f6-4e59-9428-aebaeaa8d9ec")
-	)
-	(wire
-		(pts
 			(xy 207.01 118.11) (xy 207.01 113.03)
 		)
 		(stroke
@@ -6778,16 +6848,6 @@
 			(type default)
 		)
 		(uuid "5f2ead00-9e90-45aa-ad2e-89b6a8e1a0e6")
-	)
-	(wire
-		(pts
-			(xy 124.46 121.92) (xy 124.46 129.54)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "62a36eb3-3730-479b-8818-3658ee683ef8")
 	)
 	(wire
 		(pts
@@ -7051,16 +7111,6 @@
 	)
 	(wire
 		(pts
-			(xy 153.67 107.95) (xy 153.67 110.49)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "89bf60f3-b868-431b-8579-2a88afc698b2")
-	)
-	(wire
-		(pts
 			(xy 148.59 27.94) (xy 148.59 30.48)
 		)
 		(stroke
@@ -7068,16 +7118,6 @@
 			(type default)
 		)
 		(uuid "8ad7447a-d009-4034-8c12-88129294ed7f")
-	)
-	(wire
-		(pts
-			(xy 163.83 116.84) (xy 153.67 116.84)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "8cdffbf8-aae6-4114-81b0-84a81e948b1d")
 	)
 	(wire
 		(pts
@@ -7158,16 +7198,6 @@
 			(type default)
 		)
 		(uuid "9515c457-14a8-45ac-94d6-d45c7a28cf7e")
-	)
-	(wire
-		(pts
-			(xy 163.83 118.11) (xy 163.83 116.84)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "95a438fb-fc0d-4cfa-9bb4-045adab834ac")
 	)
 	(wire
 		(pts
@@ -7301,6 +7331,16 @@
 	)
 	(wire
 		(pts
+			(xy 124.46 130.81) (xy 124.46 129.54)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a661ceab-aea2-4ca9-923a-9bc2e40dde65")
+	)
+	(wire
+		(pts
 			(xy 185.42 142.24) (xy 248.92 142.24)
 		)
 		(stroke
@@ -7358,6 +7398,16 @@
 			(type default)
 		)
 		(uuid "af28a1e6-0113-44ef-8026-b94a589b2cfe")
+	)
+	(wire
+		(pts
+			(xy 160.02 118.11) (xy 160.02 130.81)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "af97375a-3d97-4874-8b55-e4bc72a7a487")
 	)
 	(wire
 		(pts
@@ -7571,6 +7621,26 @@
 	)
 	(wire
 		(pts
+			(xy 147.32 107.95) (xy 147.32 121.92)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c990050d-98b0-4355-84dd-e5a63c618087")
+	)
+	(wire
+		(pts
+			(xy 153.67 110.49) (xy 153.67 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "caa9a0eb-a45b-4b45-a40d-73e903dcd81c")
+	)
+	(wire
+		(pts
 			(xy 71.12 82.55) (xy 71.12 91.44)
 		)
 		(stroke
@@ -7671,6 +7741,16 @@
 	)
 	(wire
 		(pts
+			(xy 153.67 118.11) (xy 160.02 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d54f35d2-5f59-4237-ab9c-6b8b36f431b4")
+	)
+	(wire
+		(pts
 			(xy 34.29 96.52) (xy 34.29 92.71)
 		)
 		(stroke
@@ -7698,6 +7778,16 @@
 			(type default)
 		)
 		(uuid "d7758ae6-fda5-488b-aff3-1ca8cdb3907a")
+	)
+	(wire
+		(pts
+			(xy 153.67 107.95) (xy 147.32 107.95)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "dc3a5c40-ff69-4cfd-9ee5-4e14872677fa")
 	)
 	(wire
 		(pts
@@ -8190,7 +8280,7 @@
 		(uuid "81621c2b-2815-4a23-92ef-c1ad57fec5ca")
 	)
 	(label "Rx"
-		(at 105.41 93.98 0)
+		(at 105.41 91.44 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -8210,7 +8300,7 @@
 		(uuid "929eb4a9-4563-4851-a265-f50c98be3e39")
 	)
 	(label "Tx"
-		(at 105.41 91.44 0)
+		(at 105.41 93.98 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -8500,92 +8590,6 @@
 			(project ""
 				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
 					(reference "#PWR09")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Diode:MRA4003T3G")
-		(at 100.33 171.45 180)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "028611ab-5c88-494d-b098-d36e1b2f2226")
-		(property "Reference" "D4"
-			(at 100.33 165.1 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "MRA4003T3G"
-			(at 100.33 167.64 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Diode_SMD:D_SMA"
-			(at 100.33 167.005 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "http://www.onsemi.com/pub_link/Collateral/MRA4003T3-D.PDF"
-			(at 100.33 171.45 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "300V, 1A, General Purpose Rectifier Diode, SMA(DO-214AC)"
-			(at 100.33 171.45 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Sim.Device" "D"
-			(at 100.33 171.45 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Sim.Pins" "1=K 2=A"
-			(at 100.33 171.45 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "21295463-048e-429a-a7cb-24bdc353f516")
-		)
-		(pin "2"
-			(uuid "c812ef3e-4a09-4e2e-90b5-9bc49699cef0")
-		)
-		(instances
-			(project ""
-				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
-					(reference "D4")
 					(unit 1)
 				)
 			)
@@ -9391,6 +9395,79 @@
 		)
 	)
 	(symbol
+		(lib_id "Jumper:SolderJumper_3_Bridged12")
+		(at 147.32 125.73 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "33a53769-580b-42e2-8250-603e8554c3d5")
+		(property "Reference" "JP2"
+			(at 147.32 129.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SolderJumper_3_Bridged12"
+			(at 148.5899 128.27 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-3_P1.3mm_Bridged12_RoundedPad1.0x1.5mm"
+			(at 147.32 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 147.32 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "3-pole Solder Jumper, pins 1+2 closed/bridged"
+			(at 147.32 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "3"
+			(uuid "0c258ed8-bf02-4367-a007-039a040b96cb")
+		)
+		(pin "2"
+			(uuid "86a464b9-299b-48f8-b3f3-33004f8a3b00")
+		)
+		(pin "1"
+			(uuid "b63c1fec-c59b-4b18-bfed-a670f26b3ae6")
+		)
+		(instances
+			(project ""
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "JP2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:+3.3V")
 		(at 160.02 77.47 0)
 		(unit 1)
@@ -9456,8 +9533,74 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND")
+		(at 165.1 134.62 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "3bb77e12-442d-44a7-8746-ff455c0aee96")
+		(property "Reference" "#PWR063"
+			(at 165.1 140.97 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 165.1 139.7 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 165.1 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 165.1 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 165.1 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "0aa0fc80-fc92-44dc-9843-a8d3e9c0b8ed")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "#PWR063")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:LED")
-		(at 138.43 129.54 180)
+		(at 124.46 134.62 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -9466,23 +9609,25 @@
 		(fields_autoplaced yes)
 		(uuid "3c359b57-d197-48df-b4ee-4e4e806f93dd")
 		(property "Reference" "D5"
-			(at 140.0175 121.92 0)
+			(at 128.27 136.2074 90)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(justify right)
 			)
 		)
 		(property "Value" "LED LTST-C193TGKT-5A"
-			(at 140.0175 124.46 0)
+			(at 129.54 136.2075 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(hide yes)
 			)
 		)
 		(property "Footprint" "LED_SMD:LED_0603_1608Metric"
-			(at 138.43 129.54 0)
+			(at 124.46 134.62 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9491,7 +9636,7 @@
 			)
 		)
 		(property "Datasheet" "~"
-			(at 138.43 129.54 0)
+			(at 124.46 134.62 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9500,7 +9645,7 @@
 			)
 		)
 		(property "Description" "Light emitting diode"
-			(at 138.43 129.54 0)
+			(at 124.46 134.62 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9509,7 +9654,7 @@
 			)
 		)
 		(property "Sim.Pins" "1=K 2=A"
-			(at 138.43 129.54 0)
+			(at 124.46 134.62 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10277,6 +10422,71 @@
 		)
 	)
 	(symbol
+		(lib_id "power:+3.3V")
+		(at 154.94 134.62 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "6709aa10-65bd-4452-ab31-d0d384d2bd85")
+		(property "Reference" "#PWR065"
+			(at 154.94 138.43 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "+3.3V"
+			(at 155.702 130.048 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 154.94 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 154.94 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
+			(at 154.94 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "cb4a8ced-70f0-4c6c-8539-1243e8574159")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "#PWR065")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 90.17 142.24 0)
 		(unit 1)
@@ -10337,6 +10547,74 @@
 			(project ""
 				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
 					(reference "#PWR011")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Diode:SS38")
+		(at 100.33 171.45 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "76b3d815-86b3-4310-8b1c-306c5bb5c9c7")
+		(property "Reference" "D2"
+			(at 100.6475 165.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "B230A-13-F"
+			(at 100.6475 167.64 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Diode_SMD:D_SMA"
+			(at 100.33 167.005 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.microdiode.com/uploadfiles//PDF/SS32-THRU-SS3200-SMA.pdf"
+			(at 100.33 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "80V 3A Schottky Diode, SMA"
+			(at 100.33 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "7d13a39a-315a-4d4e-82fc-fd4658fb165d")
+		)
+		(pin "2"
+			(uuid "79794948-2914-482f-8220-302a0d388834")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "D2")
 					(unit 1)
 				)
 			)
@@ -10480,7 +10758,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 142.24 129.54 0)
+		(at 124.46 139.7 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -10489,7 +10767,7 @@
 		(fields_autoplaced yes)
 		(uuid "831250ff-a1f2-4be1-b49e-cfa05834bc8b")
 		(property "Reference" "#PWR020"
-			(at 142.24 135.89 0)
+			(at 124.46 146.05 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10498,7 +10776,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 142.24 134.62 0)
+			(at 124.46 144.78 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10506,7 +10784,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 142.24 129.54 0)
+			(at 124.46 139.7 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10515,7 +10793,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 142.24 129.54 0)
+			(at 124.46 139.7 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10524,7 +10802,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 142.24 129.54 0)
+			(at 124.46 139.7 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10546,7 +10824,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 128.27 129.54 90)
+		(at 124.46 125.73 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -10555,23 +10833,25 @@
 		(fields_autoplaced yes)
 		(uuid "84d4c99c-bfa7-491c-8fd2-7cb557519bb6")
 		(property "Reference" "R4"
-			(at 128.27 123.19 90)
+			(at 127 124.4599 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(justify left)
 			)
 		)
 		(property "Value" "680"
-			(at 128.27 125.73 90)
+			(at 127 126.9999 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(justify left)
 			)
 		)
 		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
-			(at 128.27 131.318 90)
+			(at 122.682 125.73 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10580,7 +10860,7 @@
 			)
 		)
 		(property "Datasheet" "~"
-			(at 128.27 129.54 0)
+			(at 124.46 125.73 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -10589,7 +10869,7 @@
 			)
 		)
 		(property "Description" "Resistor"
-			(at 128.27 129.54 0)
+			(at 124.46 125.73 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -11019,6 +11299,74 @@
 		)
 	)
 	(symbol
+		(lib_id "Diode:SS38")
+		(at 52.07 26.67 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "98b1f4cf-e765-49c4-97d5-c0ad747350e4")
+		(property "Reference" "D4"
+			(at 52.3875 20.32 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "B230A-13-F"
+			(at 52.3875 22.86 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Diode_SMD:D_SMA"
+			(at 52.07 22.225 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.microdiode.com/uploadfiles//PDF/SS32-THRU-SS3200-SMA.pdf"
+			(at 52.07 26.67 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "80V 3A Schottky Diode, SMA"
+			(at 52.07 26.67 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "74074d59-84bc-484a-9468-e2045f773f98")
+		)
+		(pin "2"
+			(uuid "bc48cb6e-145e-473b-9397-7aecadea3b0e")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "D4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 138.43 31.75 0)
 		(unit 1)
@@ -11200,7 +11548,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "Polarized capacitor, small symbol"
+		(property "Description" "RVT1E100M0405 - Polarized capacitor, small symbol"
 			(at 63.5 176.53 0)
 			(effects
 				(font
@@ -11289,74 +11637,6 @@
 			(project "ESPrelay"
 				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
 					(reference "C4")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Diode:SS38")
-		(at 52.07 26.67 180)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "a5298116-7ef8-4958-9e5c-62b097519409")
-		(property "Reference" "D2"
-			(at 52.3875 20.32 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "SS38"
-			(at 52.3875 22.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Diode_SMD:D_SMA"
-			(at 52.07 22.225 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "https://www.microdiode.com/uploadfiles//PDF/SS32-THRU-SS3200-SMA.pdf"
-			(at 52.07 26.67 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "80V 3A Schottky Diode, SMA"
-			(at 52.07 26.67 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "cfeaa513-603b-4c09-a51e-8404f2966d83")
-		)
-		(pin "1"
-			(uuid "7e2c2e18-e243-4eac-8466-f1f0bec73ba7")
-		)
-		(instances
-			(project ""
-				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
-					(reference "D2")
 					(unit 1)
 				)
 			)
@@ -12304,6 +12584,79 @@
 		)
 	)
 	(symbol
+		(lib_id "Jumper:SolderJumper_3_Bridged12")
+		(at 160.02 134.62 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "ca96c4df-7d74-489f-9f50-b188b143d8ae")
+		(property "Reference" "JP3"
+			(at 160.02 138.43 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SolderJumper_3_Bridged12"
+			(at 161.2899 137.16 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-3_P1.3mm_Bridged12_RoundedPad1.0x1.5mm"
+			(at 160.02 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 160.02 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "3-pole Solder Jumper, pins 1+2 closed/bridged"
+			(at 160.02 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "3"
+			(uuid "8557cde9-7333-4ae8-8167-f0153272ddc1")
+		)
+		(pin "2"
+			(uuid "8f6d1391-7bc4-4334-ad6c-3d1a5e2b1722")
+		)
+		(pin "1"
+			(uuid "2a6db354-b077-4789-8add-8f9b8ea9ecdd")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "JP3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 29.21 92.71 0)
 		(unit 1)
@@ -12929,7 +13282,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CL21A106KAYNNNE"
 			(at 222.25 31.75 0)
 			(effects
 				(font
@@ -13095,7 +13448,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 163.83 118.11 0)
+		(at 163.83 116.84 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -13104,7 +13457,7 @@
 		(fields_autoplaced yes)
 		(uuid "e7518b9a-6fd4-4c1e-b129-4849df62217b")
 		(property "Reference" "#PWR025"
-			(at 163.83 124.46 0)
+			(at 163.83 123.19 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13113,7 +13466,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 163.83 123.19 0)
+			(at 163.83 121.92 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13121,7 +13474,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 163.83 118.11 0)
+			(at 163.83 116.84 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13130,7 +13483,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 163.83 118.11 0)
+			(at 163.83 116.84 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13139,7 +13492,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 163.83 118.11 0)
+			(at 163.83 116.84 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13154,6 +13507,137 @@
 			(project ""
 				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
 					(reference "#PWR025")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 152.4 125.73 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "e86ebd9f-c3ba-41a4-a990-e654b87f57d4")
+		(property "Reference" "#PWR064"
+			(at 152.4 132.08 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 152.4 130.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 152.4 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 152.4 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 152.4 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "55283b54-06c5-430c-b931-6c037c8504fc")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "#PWR064")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3.3V")
+		(at 142.24 125.73 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "e8f91b18-4191-450b-8eb7-060733e96527")
+		(property "Reference" "#PWR062"
+			(at 142.24 129.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "+3.3V"
+			(at 143.002 121.158 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 142.24 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 142.24 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
+			(at 142.24 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "9a4f050d-d2eb-4f65-bf6a-54d777bf54b2")
+		)
+		(instances
+			(project "ESPrelay"
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "#PWR062")
 					(unit 1)
 				)
 			)
@@ -13176,7 +13660,7 @@
 				)
 			)
 		)
-		(property "Value" "LCD/BP"
+		(property "Value" "MOLEX 545480671"
 			(at 119.38 35.56 0)
 			(effects
 				(font

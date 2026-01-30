@@ -5571,7 +5571,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "4.7µF - CL05A475MP5NRNC"
+		(property "Value" "4.7µF"
 			(at 248.92 130.8099 0)
 			(effects
 				(font
@@ -7060,7 +7060,7 @@
 				)
 			)
 		)
-		(property "Value" "X201625MOB4SI - 25Mhz"
+		(property "Value" "X201625MOB4SI  25Mhz"
 			(at 203.962 29.21 90)
 			(effects
 				(font
