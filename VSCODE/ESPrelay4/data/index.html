@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Automate 4 relais + Volet</title>
+  <style>
+    :root { --b:#ddd; --bg:#f7f7f7; }
+    body{font-family:system-ui,Arial;margin:16px;max-width:1200px}
+    h1{margin:0 0 8px 0}
+    .tabs{display:flex;gap:8px;margin:12px 0}
+    .tab{padding:8px 10px;border:1px solid var(--b);border-radius:10px;background:#fff;cursor:pointer}
+    .tab.active{background:var(--bg);font-weight:700}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch}
+    .card{border:1px solid var(--b);border-radius:14px;padding:12px;min-width:260px;background:#fff}
+    .grid4{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:12px}
+    @media(min-width:1100px){ .grid4{grid-template-columns:repeat(4,minmax(260px,1fr));} }
+    .grid2{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:12px}
+    .on{font-weight:800}
+    .pill{display:inline-block;padding:2px 8px;border:1px solid var(--b);border-radius:999px;font-size:.85em;background:var(--bg)}
+    .pill.shutter{background:#eee;color:#555;border-color:#ccc}
+    button{padding:8px 10px;border-radius:10px;border:1px solid #aaa;background:#fff;cursor:pointer}
+    button.primary{background:var(--bg);font-weight:700}
+    button.small{padding:6px 8px;font-size:.9em}
+    select,input[type="number"],input[type="text"]{padding:6px 8px;border-radius:10px;border:1px solid var(--b)}
+    label{user-select:none}
+    .muted{color:#666}
+    .sep{height:1px;background:var(--b);margin:10px 0}
+    .ok{color:#0a7a2f;font-weight:700}
+    .err{color:#b00020;font-weight:700}
+    pre{background:#fafafa;border:1px solid var(--b);padding:10px;border-radius:12px;overflow:auto}
+    .hide{display:none}
+    .inline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .chip{border:1px solid var(--b);border-radius:999px;padding:6px 10px;background:var(--bg)}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .hr{height:1px;background:var(--b);margin:8px 0}
+    .shutter-relay{background:#f2f2f2;color:#777;border-color:#ddd}
+    .led{display:inline-block;width:12px;height:12px;border-radius:999px;border:1px solid #bbb;background:#e6e6e6;vertical-align:middle;margin-right:6px}
+    .led.on{background:#27c046;border-color:#1aa13a}
+  </style>
+</head>
+<body>
+  <h1>Automate Ethernet — ESPRelay4</h1>
+  <div class="inline">
+    <span class="pill">API</span>
+    <span class="muted">/api/state • /api/rules • /api/override</span>
+    <span id="net" class="pill">ETH: ?</span>
+    <span id="msg"></span>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="dash">Dashboard</div>
+    <div class="tab" data-tab="prog">Programmation</div>
+    <div class="tab" data-tab="json">JSON</div>
+    <div class="tab" data-tab="net">Réseau</div>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="tab-dash">
+    <div class="row">
+      <div class="card" style="flex:1;min-width:320px">
+        <h3>Entrées</h3>
+        <div id="inputsView" class="inline">...</div>
+        <div class="sep"></div>
+        <div class="muted">E1..E4 = IO4..IO7</div>
+      </div>
+
+      <div class="card" style="flex:1;min-width:320px">
+        <h3>Relais</h3>
+        <div id="relaysView">...</div>
+        <div class="sep"></div>
+        <button class="small" onclick="setAllAuto()">Tout en AUTO</button>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <div class="card" style="flex:1;min-width:320px">
+        <h3>Volet roulant</h3>
+        <div id="shutterDash">Aucun volet configuré.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROGRAMMATION -->
+  <div id="tab-prog" class="hide">
+    <div class="inline" style="margin:8px 0 12px 0;">
+      <button class="primary" onclick="loadRules()">Charger règles</button>
+      <button class="primary" onclick="saveRules()">Sauver règles</button>
+      <span class="muted">Règles sauvegardées en flash.</span>
+    </div>
+
+    <div class="card" style="margin-bottom:12px">
+      <h3>Règles simples (R1..R4)</h3>
+      <div class="muted">FOLLOW / AND / OR / XOR / TOGGLE_RISE / PULSE_RISE + invert + délais.</div>
+    </div>
+
+    <div id="rulesGrid" class="grid4"></div>
+
+    <div class="sep"></div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>Volet (AJOUT)</h3>
+        <div class="muted">
+          Ajoute un volet sur 2 relais au choix. Ne supprime pas les règles simples.
+          <br>Le firmware doit appliquer l’interlock + dead-time pour ces 2 relais.
+        </div>
+        <div class="sep"></div>
+
+        <div class="inline">
+          <span class="muted">Nom</span>
+          <input id="sh_name" type="text" value="Volet" />
+        </div>
+
+        <div class="sep"></div>
+
+        <div class="two">
+          <div>
+            <div class="muted"><b>Commande UP</b></div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">Entrée</span>
+              <select id="sh_up_in"></select>
+            </div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">Relais</span>
+              <select id="sh_up_relay"></select>
+            </div>
+          </div>
+
+          <div>
+            <div class="muted"><b>Commande DOWN</b></div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">Entrée</span>
+              <select id="sh_down_in"></select>
+            </div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">Relais</span>
+              <select id="sh_down_relay"></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="sep"></div>
+
+        <div class="inline">
+          <span class="muted">Mode</span>
+          <select id="sh_mode">
+            <option value="hold">hold (maintenu)</option>
+            <option value="toggle">toggle (appui = marche/stop)</option>
+          </select>
+        </div>
+
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">Priorité si 2 boutons</span>
+          <select id="sh_priority">
+            <option value="stop">stop (recommandé)</option>
+            <option value="up">up</option>
+            <option value="down">down</option>
+          </select>
+        </div>
+
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">Dead-time</span>
+          <input id="sh_dead" type="number" min="0" max="5000" value="400" />
+          <span class="muted">ms</span>
+        </div>
+
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">Temps max</span>
+          <input id="sh_max" type="number" min="0" max="120000" value="25000" />
+          <span class="muted">ms (0 = désactivé)</span>
+        </div>
+
+        <div class="sep"></div>
+        <button class="primary" onclick="applyShutter()">Ajouter / Mettre à jour</button>
+        <button class="small" onclick="removeShutter()">Supprimer volet</button>
+
+        <div class="sep"></div>
+        <pre id="sh_preview">{}</pre>
+      </div>
+
+      <div class="card">
+        <h3>Notes</h3>
+        <div class="muted">
+          - Les règles simples continuent d’exister.<br>
+          - Le volet ajoute <code>rules.shutters[0]</code> uniquement.<br>
+          - Si un volet utilise R1/R2, le firmware doit décider la priorité (recommandé : le volet écrase R1/R2).<br>
+        </div>
+        <div class="sep"></div>
+        <pre id="jsonBox">{}</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- JSON -->
+  <div id="tab-json" class="hide">
+    <div class="inline" style="margin:8px 0 12px 0;">
+      <button class="primary" onclick="loadRules()">Charger règles</button>
+      <button class="primary" onclick="saveRules()">Sauver règles</button>
+      <span class="muted">Vue du JSON complet</span>
+    </div>
+    <pre id="jsonAll">{}</pre>
+  </div>
+
+  <!-- NETWORK -->
+  <div id="tab-net" class="hide">
+    <div class="card" style="max-width:640px;">
+      <h3>Configuration réseau</h3>
+      <div class="muted">Choisir DHCP ou IP statique. Les changements s’appliquent immédiatement.</div>
+      <div class="sep"></div>
+
+      <div class="inline">
+        <span class="muted">Mode</span>
+        <select id="net_mode">
+          <option value="dhcp">DHCP</option>
+          <option value="static">Statique</option>
+        </select>
+      </div>
+
+      <div class="sep"></div>
+
+      <div class="inline">
+        <span class="muted">IP</span>
+        <input id="net_ip" type="text" placeholder="192.168.1.50">
+      </div>
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">Passerelle</span>
+        <input id="net_gw" type="text" placeholder="192.168.1.1">
+      </div>
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">Masque</span>
+        <input id="net_sn" type="text" placeholder="255.255.255.0">
+      </div>
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">DNS</span>
+        <input id="net_dns" type="text" placeholder="192.168.1.1">
+      </div>
+
+      <div class="sep"></div>
+      <button class="primary" onclick="saveNet()">Sauver réseau</button>
+      <span class="muted" id="net_hint"></span>
+    </div>
+  </div>
+
+<script>
+const MODES = [
+  {id:"FOLLOW", label:"FOLLOW (1 entrée)"},
+  {id:"AND", label:"AND (plusieurs)"},
+  {id:"OR", label:"OR (plusieurs)"},
+  {id:"XOR", label:"XOR (plusieurs)"},
+  {id:"TOGGLE_RISE", label:"TOGGLE_RISE (front +)"},
+  {id:"PULSE_RISE", label:"PULSE_RISE (front +)"},
+];
+
+function $(id){ return document.getElementById(id); }
+function toast(text, ok=true){
+  const m = $("msg");
+  m.className = ok ? "ok" : "err";
+  m.textContent = ok ? `✅ ${text}` : `❌ ${text}`;
+  setTimeout(()=>{ m.textContent=""; m.className=""; }, 1800);
+}
+function switchTab(name){
+  for(const t of ["dash","prog","json","net"]){
+    $("tab-"+t).classList.toggle("hide", t!==name);
+    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
+  }
+  if(name === "prog" && rules) renderSimpleRules();
+  if(name === "net") loadNet();
+}
+document.querySelectorAll(".tab").forEach(el=>{
+  el.addEventListener("click", ()=>switchTab(el.dataset.tab));
+});
+
+// -------- API helpers --------
+async function apiJson(path, opts){
+  const r = await fetch(path, Object.assign({cache:"no-store"}, opts||{}));
+  const ct = r.headers.get("content-type") || "";
+  if(!r.ok){
+    const t = ct.includes("application/json") ? JSON.stringify(await r.json()) : await r.text();
+    throw new Error(`${r.status} ${r.statusText} - ${t}`);
+  }
+  if(ct.includes("application/json")) return await r.json();
+  return await r.text();
+}
+const getState = ()=>apiJson("/api/state");
+const getRules = ()=>apiJson("/api/rules");
+const putRules = (body)=>apiJson("/api/rules",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const postOverride = (relay, mode)=>apiJson("/api/override",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({relay,mode})});
+const postShutter = (cmd)=>apiJson("/api/shutter",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cmd})});
+const getNet = ()=>apiJson("/api/net");
+const putNet = (body)=>apiJson("/api/net",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+
+// -------- data model --------
+let rules = null;
+let lastState = null;
+let netCfg = null;
+
+function defaultRules(){
+  return {
+    version: 2,
+    relays: [
+      { expr:{op:"FOLLOW", in:1}, invert:false, onDelay:0, offDelay:0, pulseMs:200 },
+      { expr:{op:"FOLLOW", in:2}, invert:false, onDelay:0, offDelay:0, pulseMs:200 },
+      { expr:{op:"FOLLOW", in:3}, invert:false, onDelay:0, offDelay:0, pulseMs:200 },
+      { expr:{op:"FOLLOW", in:4}, invert:false, onDelay:0, offDelay:0, pulseMs:200 }
+    ],
+    shutters: []
+  };
+}
+
+function ensureRulesBase(r){
+  if(!r || typeof r!=="object") r = defaultRules();
+  if(!r.version) r.version = 2;
+  if(!Array.isArray(r.relays)) r.relays = defaultRules().relays;
+  if(r.relays.length !== 4){
+    const d = defaultRules();
+    r.relays = d.relays;
+  }
+  if(!Array.isArray(r.shutters)) r.shutters = [];
+  return r;
+}
+
+function getShutterRelaySet(){
+  const sh = rules?.shutters?.[0];
+  const set = new Set();
+  if(!sh) return set;
+  const up = Number(sh.up_relay);
+  const down = Number(sh.down_relay);
+  if(Number.isFinite(up)) set.add(up);
+  if(Number.isFinite(down)) set.add(down);
+  return set;
+}
+
+// -------- Simple rules editor --------
+function selectedInputsForRelay(i){
+  const cbs = document.querySelectorAll(`input[type="checkbox"][data-ri="${i}"][data-in]`);
+  const ins = [];
+  cbs.forEach(cb=>{ if(cb.checked) ins.push(Number(cb.dataset.in)); });
+  return ins;
+}
+
+function normalizeRelayExpr(i){
+  const r = rules.relays[i];
+  if(!r.expr) r.expr = {op:"FOLLOW", in:1};
+  const op = r.expr.op || "FOLLOW";
+  const ins = selectedInputsForRelay(i);
+
+  if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE"){
+    r.expr = {op, in: ins[0] || (r.expr.in || 1)};
+  } else {
+    r.expr = {op, ins: (ins.length ? ins : (r.expr.ins || [1]))};
+  }
+  // conserver pulseMs dans la règle (à plat, comme ton firmware actuel peut le lire ou non)
+  if(r.pulseMs === undefined) r.pulseMs = 200;
+}
+
+function ruleCard(i, r, isShutterRelay){
+  if(!r.expr) r.expr = {op:"FOLLOW", in:1};
+  const op = r.expr.op || "FOLLOW";
+  const checked = new Set();
+  if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE"){
+    checked.add(r.expr.in || 1);
+  } else {
+    (r.expr.ins || []).forEach(x=>checked.add(x));
+  }
+
+  const modeOptions = MODES.map(m => `<option value="${m.id}" ${m.id===op?"selected":""}>${m.label}</option>`).join("");
+
+  const inputsHtml = [1,2,3,4].map(n=>{
+    return `
+      <label style="margin-right:10px;">
+        <input type="checkbox" data-ri="${i}" data-in="${n}" ${checked.has(n)?"checked":""} onchange="onInputsChanged(event)" ${isShutterRelay ? "disabled" : ""}>
+        E${n}
+      </label>`;
+  }).join("");
+
+  const inv = !!r.invert;
+  const onDelay = Number(r.onDelay||0);
+  const offDelay = Number(r.offDelay||0);
+  const pulseMs = Number(r.pulseMs||200);
+
+  const pulseRow = (op==="PULSE_RISE")
+    ? `<div class="inline" style="margin-top:8px;">
+         <span class="muted">pulseMs</span>
+         <input type="number" min="10" max="60000" value="${pulseMs}" data-ri="${i}" data-field="pulseMs" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
+         <span class="muted">ms</span>
+       </div>`
+    : "";
+
+  const shutterBadge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">VOLET</span>` : "";
+  return `
+    <div class="card ${isShutterRelay ? "shutter-relay" : ""}">
+      <h3>Relais R${i+1} ${shutterBadge}</h3>
+
+      <div class="inline">
+        <span class="muted">Mode</span>
+        <select data-ri="${i}" data-field="op" onchange="onModeChanged(event)" ${isShutterRelay ? "disabled" : ""}>${modeOptions}</select>
+      </div>
+
+      <div class="hr"></div>
+
+      <div><b>Entrées</b></div>
+      <div class="inline" style="margin-top:6px;">${inputsHtml}</div>
+      <div class="muted" style="margin-top:6px;">FOLLOW/TOGGLE/PULSE = 1 entrée. AND/OR/XOR = plusieurs.</div>
+
+      <div class="hr"></div>
+
+      <div class="inline">
+        <label><input type="checkbox" data-ri="${i}" data-field="invert" ${inv?"checked":""} onchange="onInvertChanged(event)" ${isShutterRelay ? "disabled" : ""}> Inverser</label>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="inline">
+        <span class="muted">onDelay</span>
+        <input type="number" min="0" max="600000" value="${onDelay}" data-ri="${i}" data-field="onDelay" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
+        <span class="muted">ms</span>
+      </div>
+
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">offDelay</span>
+        <input type="number" min="0" max="600000" value="${offDelay}" data-ri="${i}" data-field="offDelay" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
+        <span class="muted">ms</span>
+      </div>
+
+      ${pulseRow}
+
+      <div class="hr"></div>
+
+      <button class="small" onclick="applyOne(${i})" ${isShutterRelay ? "disabled" : ""}>Appliquer R${i+1}</button>
+    </div>
+  `;
+}
+
+function renderSimpleRules(){
+  const shRelays = getShutterRelaySet();
+  $("rulesGrid").innerHTML = rules.relays.map((r,i)=>ruleCard(i,r, shRelays.has(i+1))).join("");
+}
+
+window.onModeChanged = (ev)=>{
+  const i = Number(ev.target.dataset.ri);
+  const op = ev.target.value;
+  rules.relays[i].expr = rules.relays[i].expr || {};
+  rules.relays[i].expr.op = op;
+  normalizeRelayExpr(i);
+  renderAll();
+};
+window.onInputsChanged = (ev)=>{
+  const i = Number(ev.target.dataset.ri);
+  normalizeRelayExpr(i);
+  renderJsonBoxes();
+};
+window.onInvertChanged = (ev)=>{
+  const i = Number(ev.target.dataset.ri);
+  rules.relays[i].invert = ev.target.checked;
+  renderJsonBoxes();
+};
+window.onFieldChanged = (ev)=>{
+  const i = Number(ev.target.dataset.ri);
+  const field = ev.target.dataset.field;
+  rules.relays[i][field] = Number(ev.target.value||0);
+  renderJsonBoxes();
+};
+window.applyOne = async (i)=>{
+  try{
+    normalizeRelayExpr(i);
+    await putRules(rules);
+    toast(`Règles appliquées (R${i+1})`);
+    await loadRules();
+  }catch(e){
+    toast(e.message, false);
+  }
+};
+
+// -------- Shutter (additive) --------
+function fillSelect(id, prefix, n){
+  const sel = $(id);
+  sel.innerHTML = "";
+  for(let i=1;i<=n;i++){
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = `${prefix}${i}`;
+    sel.appendChild(o);
+  }
+}
+
+function shutterFromUI(){
+  return {
+    name: $("sh_name").value || "Volet",
+    up_in: Number($("sh_up_in").value),
+    down_in: Number($("sh_down_in").value),
+    up_relay: Number($("sh_up_relay").value),
+    down_relay: Number($("sh_down_relay").value),
+    mode: $("sh_mode").value,
+    priority: $("sh_priority").value,
+    deadtime_ms: Number($("sh_dead").value||0),
+    max_run_ms: Number($("sh_max").value||0)
+  };
+}
+function setUIFromShutter(sh){
+  $("sh_name").value = sh.name || "Volet";
+  $("sh_up_in").value = String(sh.up_in || 1);
+  $("sh_down_in").value = String(sh.down_in || 2);
+  $("sh_up_relay").value = String(sh.up_relay || 1);
+  $("sh_down_relay").value = String(sh.down_relay || 2);
+  $("sh_mode").value = sh.mode || "hold";
+  $("sh_priority").value = sh.priority || "stop";
+  $("sh_dead").value = String(sh.deadtime_ms ?? 400);
+  $("sh_max").value = String(sh.max_run_ms ?? 25000);
+}
+function updateShPreview(){
+  $("sh_preview").textContent = JSON.stringify(shutterFromUI(), null, 2);
+}
+["sh_name","sh_up_in","sh_down_in","sh_up_relay","sh_down_relay","sh_mode","sh_priority","sh_dead","sh_max"]
+  .forEach(id => $(id).addEventListener("change", updateShPreview));
+
+async function applyShutter(){
+  try{
+    const sh = shutterFromUI();
+    if(sh.up_relay === sh.down_relay){
+      toast("UP relay et DOWN relay doivent être différents", false);
+      return;
+    }
+    rules.shutters = [sh];
+    await putRules(rules);
+    toast("Volet ajouté / mis à jour");
+    await loadRules();
+  }catch(e){
+    toast(e.message, false);
+  }
+}
+async function removeShutter(){
+  try{
+    rules.shutters = [];
+    await putRules(rules);
+    toast("Volet supprimé");
+    await loadRules();
+  }catch(e){
+    toast(e.message, false);
+  }
+}
+
+// -------- Dashboard rendering --------
+function renderState(s){
+  lastState = s;
+  if(s.eth){
+    const link = s.eth.link ? "ON" : "OFF";
+    $("net").textContent = `ETH: ${link} ${s.eth.ip||""}`;
+  }
+
+  $("inputsView").innerHTML = s.inputs.map((v,i)=>
+    `<span class="chip">E${i+1}: <span class="${v?'on':''}">${v?'ON':'OFF'}</span></span>`
+  ).join("");
+
+  $("relaysView").innerHTML = s.relays.map((v,i)=>{
+    const shRelays = getShutterRelaySet();
+    const isShutterRelay = shRelays.has(i+1);
+    const ov = (s.override && s.override[i] !== undefined) ? s.override[i] : -1;
+    const modeLabel = ov===-1 ? "AUTO" : (ov===1 ? "FORCE ON" : "FORCE OFF");
+    const badge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">VOLET</span>` : "";
+    const ledClass = v ? "led on" : "led";
+    const stateHtml = isShutterRelay ? "" : `<span class="${v?'on':''}">${v?'ON':'OFF'}</span>`;
+    const modeHtml = isShutterRelay ? "" : `<span class="pill">${modeLabel}</span>`;
+    const overrideHtml = isShutterRelay ? "" : `
+        <div style="margin-top:6px;">
+          <button class="small" onclick="setOverride(${i+1},'AUTO')">AUTO</button>
+          <button class="small" onclick="setOverride(${i+1},'FORCE_ON')">ON</button>
+          <button class="small" onclick="setOverride(${i+1},'FORCE_OFF')">OFF</button>
+        </div>
+    `;
+    return `
+      <div class="${isShutterRelay ? "shutter-relay" : ""}" style="margin:8px 0;">
+        <span class="${ledClass}"></span><b>R${i+1}</b>${badge} :
+        ${stateHtml}
+        ${modeHtml}
+        ${overrideHtml}
+      </div>
+      <div class="hr"></div>
+    `;
+  }).join("");
+
+  renderShutterDash();
+}
+
+async function setOverride(relay, mode){
+  try{ await postOverride(relay, mode); toast(`R${relay} -> ${mode}`); }
+  catch(e){ toast(e.message, false); }
+}
+async function setAllAuto(){
+  try{ for(let i=1;i<=4;i++) await postOverride(i,"AUTO"); toast("Tout en AUTO"); }
+  catch(e){ toast(e.message, false); }
+}
+
+function renderShutterDash(){
+  const sh = rules?.shutters?.[0];
+  if(!sh){
+    $("shutterDash").textContent = "Aucun volet configuré.";
+    return;
+  }
+  $("shutterDash").innerHTML = `
+    <div class="inline">
+      <span class="pill">${sh.name || "Volet"}</span>
+      <span class="muted">UP=R${sh.up_relay} / DOWN=R${sh.down_relay}</span>
+    </div>
+    <div class="sep"></div>
+    <div class="inline">
+      <button class="primary" onclick="shutterUp()">UP</button>
+      <button class="primary" onclick="shutterStop()">STOP</button>
+      <button class="primary" onclick="shutterDown()">DOWN</button>
+    </div>
+    <div class="muted" style="margin-top:8px">
+      Commande via Override (le firmware doit assurer l’interlock).
+    </div>
+  `;
+}
+async function shutterStop(){
+  const sh = rules?.shutters?.[0]; if(!sh) return;
+  await postShutter("STOP");
+  await refreshState();
+}
+async function shutterUp(){
+  const sh = rules?.shutters?.[0]; if(!sh) return;
+  await postShutter("UP");
+  await refreshState();
+}
+async function shutterDown(){
+  const sh = rules?.shutters?.[0]; if(!sh) return;
+  await postShutter("DOWN");
+  await refreshState();
+}
+
+// -------- JSON boxes --------
+function renderJsonBoxes(){
+  $("jsonBox").textContent = JSON.stringify(rules, null, 2);
+  $("jsonAll").textContent = JSON.stringify(rules, null, 2);
+}
+
+// -------- Load / Save --------
+function renderAll(){
+  renderSimpleRules();
+  renderJsonBoxes();
+  renderShutterDash();
+}
+
+// -------- Network config --------
+function setNetUI(cfg){
+  $("net_mode").value = cfg.mode || "static";
+  $("net_ip").value = cfg.ip || "";
+  $("net_gw").value = cfg.gw || "";
+  $("net_sn").value = cfg.sn || "";
+  $("net_dns").value = cfg.dns || "";
+  updateNetUiState();
+}
+
+function updateNetUiState(){
+  const dhcp = $("net_mode").value === "dhcp";
+  ["net_ip","net_gw","net_sn","net_dns"].forEach(id=>{
+    $(id).disabled = dhcp;
+  });
+  $("net_hint").textContent = dhcp ? "DHCP activé" : "";
+}
+
+function readNetUI(){
+  return {
+    mode: $("net_mode").value,
+    ip: $("net_ip").value.trim(),
+    gw: $("net_gw").value.trim(),
+    sn: $("net_sn").value.trim(),
+    dns: $("net_dns").value.trim()
+  };
+}
+
+async function loadNet(){
+  try{
+    netCfg = await getNet();
+    if(!netCfg || (netCfg.mode !== "dhcp" && netCfg.mode !== "static")){
+      netCfg = {mode:"static", ip:"", gw:"", sn:"", dns:""};
+    }
+    setNetUI(netCfg);
+  }catch(e){
+    toast("GET /api/net indisponible", false);
+  }
+}
+
+async function saveNet(){
+  try{
+    const body = readNetUI();
+    await putNet(body);
+    toast("Réseau sauvegardé");
+    await loadNet();
+  }catch(e){
+    toast(e.message, false);
+  }
+}
+
+$("net_mode").addEventListener("change", updateNetUiState);
+
+async function loadRules(){
+  try{
+    rules = ensureRulesBase(await getRules());
+    toast("Règles chargées");
+  }catch(e){
+    rules = ensureRulesBase(defaultRules());
+    toast("GET /api/rules indisponible (fallback)", false);
+  }
+
+  // selects volet
+  fillSelect("sh_up_in","E",4);
+  fillSelect("sh_down_in","E",4);
+  fillSelect("sh_up_relay","R",4);
+  fillSelect("sh_down_relay","R",4);
+
+  const sh = rules.shutters?.[0] || {
+    name:"Volet", up_in:1, down_in:2, up_relay:1, down_relay:2,
+    mode:"hold", priority:"stop", deadtime_ms:400, max_run_ms:25000
+  };
+  setUIFromShutter(sh);
+  updateShPreview();
+
+  renderAll();
+  if(lastState) renderState(lastState);
+}
+
+async function saveRules(){
+  try{
+    // normaliser toutes les expressions avant envoi
+    for(let i=0;i<4;i++) normalizeRelayExpr(i);
+    await putRules(rules);
+    toast("Règles sauvegardées");
+    await loadRules();
+  }catch(e){
+    toast(e.message, false);
+  }
+}
+
+// -------- Live refresh --------
+async function refreshState(){
+  try{
+    const s = await getState();
+    renderState(s);
+  }catch(e){
+    $("net").textContent = "ETH: ?";
+  }
+}
+
+setInterval(refreshState, 600);
+loadRules();
+refreshState();
+loadNet();
+</script>
+</body>
+</html>
