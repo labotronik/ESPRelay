@@ -17,7 +17,6 @@
 //   POST /api/override     -> override d'un relais (REFUSE si relais réservé volet)
 //   POST /api/shutter      -> commande volet (UP/DOWN/STOP) (seul moyen "API" de bouger les relais volet)
 //
-// IMPORTANT: adapte ces pins à ton PCB : I2C_SDA/I2C_SCL et PIN_W5500_CS, PIN_LED.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -31,9 +30,15 @@
 static const uint8_t PIN_LED = 40;
 
 // I2C (PCA9538)
-static const int I2C_SDA = 8;     // <-- adapte
-static const int I2C_SCL = 9;     // <-- adapte
-static const uint8_t PCA_ADDR = 0x70;
+static const int I2C_SDA = 8;     
+static const int I2C_SCL = 9;     
+static const uint8_t PCA_BASE_ADDR = 0x70;
+static const uint8_t PCA_MAX_MODULES = 4;
+static const uint8_t RELAYS_PER_MODULE = 4;
+static const uint8_t INPUTS_PER_MODULE = 4;
+static const uint8_t MAX_RELAYS = PCA_MAX_MODULES * RELAYS_PER_MODULE;
+static const uint8_t MAX_INPUTS = PCA_MAX_MODULES * INPUTS_PER_MODULE;
+static const uint8_t SHUTTER_MAX = 2;
 
 // W5500 (SPI)
 static const int PIN_W5500_CS = 10;  // <-- adapte
@@ -58,7 +63,7 @@ public:
 EthernetServerCompat server(80);
 
 // ===================== Réseau (à adapter) ======================
-byte mac[] = { 0x02,0x12,0x34,0x56,0x78,0x9A };
+byte mac[6] = { 0,0,0,0,0,0 };
 
 struct NetConfig {
   bool dhcp;
@@ -75,6 +80,16 @@ static NetConfig netCfg = {
   IPAddress(255,255,255,0),
   IPAddress(192,168,1,1)
 };
+
+static void buildEthernetMac() {
+  uint64_t mac64 = ESP.getEfuseMac();
+  mac[0] = (mac64 >> 40) & 0xFF;
+  mac[1] = (mac64 >> 32) & 0xFF;
+  mac[2] = (mac64 >> 24) & 0xFF;
+  mac[3] = (mac64 >> 16) & 0xFF;
+  mac[4] = (mac64 >> 8) & 0xFF;
+  mac[5] = 0xFE;
+}
 
 // ===================== MQTT ======================
 struct MqttConfig {
@@ -105,38 +120,42 @@ static EthernetClient mqttEth;
 static PubSubClient mqttClient(mqttEth);
 static uint32_t mqttLastConnectMs = 0;
 static bool mqttAnnounced = false;
-static bool lastInputsPub[4] = {false,false,false,false};
-static bool lastRelaysPub[4] = {false,false,false,false};
-static int lastShutterMove = -1;
+static bool lastInputsPub[MAX_INPUTS] = {false};
+static bool lastRelaysPub[MAX_RELAYS] = {false};
+static int lastShutterMove[SHUTTER_MAX] = {-1,-1};
 
 
 // ===================== Etat IO =====================
-bool inputs[4] = {0,0,0,0};   // E1..E4 = IO4..IO7
-bool prevInputs[4] = {0,0,0,0};
+bool inputs[MAX_INPUTS] = {0};
+bool prevInputs[MAX_INPUTS] = {0};
 
-bool relays[4] = {0,0,0,0};   // R1..R4 = IO0..IO3 (final)
-bool relayFromSimple[4] = {0,0,0,0};
-bool relayFromShutter[4] = {0,0,0,0};
+bool relays[MAX_RELAYS] = {0};
+bool relayFromSimple[MAX_RELAYS] = {0};
+bool relayFromShutter[MAX_RELAYS] = {0};
 
-uint8_t pcaOutCache = 0x00;
+uint8_t pcaOutCache[PCA_MAX_MODULES] = {0};
+bool pcaPresent[PCA_MAX_MODULES] = {false};
+uint8_t pcaCount = 0;
+uint8_t totalRelays = 4;
+uint8_t totalInputs = 4;
 
 // Overrides : -1 auto, 0 force off, 1 force on (uniquement pour relais NON réservés)
-int8_t overrideRelay[4] = {-1,-1,-1,-1};
+int8_t overrideRelay[MAX_RELAYS];
 
 // Mémoire toggle + pulse pour règles simples
-bool toggleState[4] = {0,0,0,0};
-uint32_t pulseUntilMs[4] = {0,0,0,0};
+bool toggleState[MAX_RELAYS] = {0};
+uint32_t pulseUntilMs[MAX_RELAYS] = {0};
 
 // Delay state pour règles simples
-bool pendingTarget[4] = {0,0,0,0};
-bool hasPending[4] = {0,0,0,0};
-uint32_t pendingDeadlineMs[4] = {0,0,0,0};
+bool pendingTarget[MAX_RELAYS] = {0};
+bool hasPending[MAX_RELAYS] = {0};
+uint32_t pendingDeadlineMs[MAX_RELAYS] = {0};
 
 // Réservation des relais par volet
-bool reservedByShutter[4] = {false,false,false,false};
+bool reservedByShutter[MAX_RELAYS] = {false};
 
 // ===================== Règles JSON en RAM ======================
-DynamicJsonDocument rulesDoc(3072);
+DynamicJsonDocument rulesDoc(8192);
 
 // ===============================================================
 // I2C helpers (STOP entre write et read => évite i2cWriteReadNonStop)
@@ -224,6 +243,10 @@ static void netCfgToJson(String &out) {
     doc["sn"] = netCfg.sn.toString();
     doc["dns"] = netCfg.dns.toString();
   }
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  doc["mac"] = macStr;
   serializeJsonPretty(doc, out);
 }
 
@@ -318,38 +341,73 @@ static void sendFile(EthernetClient& client, const char* path, const char* conte
 // ===============================================================
 // PCA9538
 // ===============================================================
-static bool pcaInit() {
-  Wire.beginTransmission(PCA_ADDR);
+static bool pcaInitModule(uint8_t addr, uint8_t &outCache) {
+  Wire.beginTransmission(addr);
   if (Wire.endTransmission(true) != 0) return false;
 
-  if (!i2cWriteReg8(PCA_ADDR, REG_POL, 0x00)) return false;
-  if (!i2cWriteReg8(PCA_ADDR, REG_CFG, 0xF0)) return false; // IO0..3 out, IO4..7 in
+  if (!i2cWriteReg8(addr, REG_POL, 0x00)) return false;
+  if (!i2cWriteReg8(addr, REG_CFG, 0xF0)) return false; // IO0..3 out, IO4..7 in
 
   // outputs off
   uint8_t outNibble = RELAY_ACTIVE_LOW ? 0x0F : 0x00;
-  pcaOutCache = (pcaOutCache & 0xF0) | (outNibble & 0x0F);
-  if (!i2cWriteReg8(PCA_ADDR, REG_OUTPUT, pcaOutCache)) return false;
+  outCache = (outCache & 0xF0) | (outNibble & 0x0F);
+  if (!i2cWriteReg8(addr, REG_OUTPUT, outCache)) return false;
 
   return true;
 }
 
+static void pcaScanAndInit() {
+  pcaCount = 0;
+  int lastPresent = -1;
+  for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
+    uint8_t addr = PCA_BASE_ADDR + m;
+    pcaPresent[m] = false;
+    if (pcaInitModule(addr, pcaOutCache[m])) {
+      pcaPresent[m] = true;
+      if ((int)m > lastPresent) lastPresent = m;
+    }
+  }
+  if (lastPresent >= 0) {
+    pcaCount = (uint8_t)(lastPresent + 1);
+  } else {
+    pcaCount = 1; // fallback logique
+  }
+  totalRelays = pcaCount * RELAYS_PER_MODULE;
+  totalInputs = pcaCount * INPUTS_PER_MODULE;
+
+  for (int i = 0; i < MAX_RELAYS; i++) {
+    overrideRelay[i] = -1;
+  }
+}
+
 static void pcaReadInputs() {
-  uint8_t in = 0;
-  if(!i2cReadReg8(PCA_ADDR, REG_INPUT, in)) return;
-  for(int i=0;i<4;i++){
-    inputs[i] = (in >> (4+i)) & 0x1; // IO4..IO7
+  for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
+    uint8_t base = m * INPUTS_PER_MODULE;
+    if (!pcaPresent[m]) {
+      for (uint8_t i = 0; i < INPUTS_PER_MODULE; i++) inputs[base + i] = false;
+      continue;
+    }
+    uint8_t in = 0;
+    if(!i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)) continue;
+    for(uint8_t i=0;i<INPUTS_PER_MODULE;i++){
+      inputs[base + i] = (in >> (4+i)) & 0x1; // IO4..IO7
+    }
   }
 }
 
 static void pcaApplyRelays() {
-  uint8_t nibble = 0;
-  for(int i=0;i<4;i++){
-    bool v = relays[i];
-    if(RELAY_ACTIVE_LOW) v = !v;
-    if(v) nibble |= (1u << i);
+  for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
+    if (!pcaPresent[m]) continue;
+    uint8_t base = m * RELAYS_PER_MODULE;
+    uint8_t nibble = 0;
+    for(uint8_t i=0;i<RELAYS_PER_MODULE;i++){
+      bool v = relays[base + i];
+      if(RELAY_ACTIVE_LOW) v = !v;
+      if(v) nibble |= (1u << i);
+    }
+    pcaOutCache[m] = (pcaOutCache[m] & 0xF0) | (nibble & 0x0F);
+    i2cWriteReg8(PCA_BASE_ADDR + m, REG_OUTPUT, pcaOutCache[m]);
   }
-  pcaOutCache = (pcaOutCache & 0xF0) | (nibble & 0x0F);
-  i2cWriteReg8(PCA_ADDR, REG_OUTPUT, pcaOutCache);
 }
 
 // ===============================================================
@@ -360,11 +418,11 @@ static void setDefaultRules() {
   rulesDoc["version"] = 2;
 
   JsonArray rel = rulesDoc.createNestedArray("relays");
-  for(int i=0;i<4;i++){
+  for(int i=0;i<totalRelays;i++){
     JsonObject r = rel.createNestedObject();
     JsonObject expr = r.createNestedObject("expr");
     expr["op"] = "FOLLOW";
-    expr["in"] = i+1;
+    expr["in"] = (i+1 <= totalInputs) ? (i+1) : 1;
     r["invert"] = false;
     r["onDelay"] = 0;
     r["offDelay"] = 0;
@@ -399,7 +457,7 @@ static bool loadRulesFromFS() {
   }
 
   // ensure base fields
-  if(!rulesDoc["relays"].is<JsonArray>() || rulesDoc["relays"].as<JsonArray>().size() != 4){
+  if(!rulesDoc["relays"].is<JsonArray>() || rulesDoc["relays"].as<JsonArray>().size() != totalRelays){
     Serial.println("[RULES] invalid relays[] -> default");
     setDefaultRules();
     saveRulesToFS(rulesDoc);
@@ -452,8 +510,8 @@ struct ShutterRuntime {
   ManualCmd manual = MC_NONE;
 };
 
-ShutterCfg shCfg;
-ShutterRuntime shRt;
+ShutterCfg shCfg[SHUTTER_MAX];
+ShutterRuntime shRt[SHUTTER_MAX];
 
 // ===============================================================
 // MQTT config (LittleFS)
@@ -534,7 +592,7 @@ static void mqttPublishDiscovery() {
   String avail = base + "/status";
   String id = node;
 
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < totalRelays; i++) {
     DynamicJsonDocument doc(512);
     String uid = id + "_relay_" + String(i+1);
     doc["name"] = "Relay " + String(i+1);
@@ -556,7 +614,7 @@ static void mqttPublishDiscovery() {
     mqttPublish(topic, out, true);
   }
 
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < totalInputs; i++) {
     DynamicJsonDocument doc(512);
     String uid = id + "_input_" + String(i+1);
     doc["name"] = "Input " + String(i+1);
@@ -577,16 +635,19 @@ static void mqttPublishDiscovery() {
     mqttPublish(topic, out, true);
   }
 
-  if (shCfg.enabled) {
+  for (int s = 0; s < SHUTTER_MAX; s++) {
+    if (!shCfg[s].enabled) continue;
     DynamicJsonDocument doc(512);
-    String uid = id + "_shutter";
-    doc["name"] = shCfg.name;
+    String uid = id + "_shutter_" + String(s+1);
+    doc["name"] = shCfg[s].name;
     doc["uniq_id"] = uid;
-    doc["cmd_t"] = base + "/shutter/set";
-    doc["stat_t"] = base + "/shutter/state";
+    doc["cmd_t"] = base + "/shutter/" + String(s+1) + "/set";
+    doc["stat_t"] = base + "/shutter/" + String(s+1) + "/state";
     doc["pl_open"] = "OPEN";
     doc["pl_close"] = "CLOSE";
     doc["pl_stop"] = "STOP";
+    doc["optimistic"] = true;
+    doc["assumed_state"] = true;
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
@@ -607,16 +668,19 @@ static void mqttPublishAllState() {
   if (!mqttClient.connected()) return;
   String base = mqttBaseTopic();
   mqttPublish(base + "/status", "online", true);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < totalRelays; i++) {
     mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
-    mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
     lastRelaysPub[i] = relays[i];
+  }
+  for (int i = 0; i < totalInputs; i++) {
+    mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
     lastInputsPub[i] = inputs[i];
   }
-  if (shCfg.enabled) {
-    const char* st = (shRt.move==SH_UP ? "opening" : (shRt.move==SH_DOWN ? "closing" : "stopped"));
-    mqttPublish(base + "/shutter/state", String(st), mqttCfg.retain);
-    lastShutterMove = (int)shRt.move;
+  for (int s = 0; s < SHUTTER_MAX; s++) {
+    if (!shCfg[s].enabled) continue;
+    const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
+    mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
+    lastShutterMove[s] = (int)shRt[s].move;
   }
 }
 
@@ -631,7 +695,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String base = mqttBaseTopic();
   if (t.startsWith(base + "/relay/") && t.endsWith("/set")) {
     int idx = t.substring((base + "/relay/").length()).toInt();
-    if (idx >= 1 && idx <= 4) {
+    if (idx >= 1 && idx <= totalRelays) {
       int i = idx - 1;
       if (!reservedByShutter[i]) {
         if (p == "ON") overrideRelay[i] = 1;
@@ -640,10 +704,14 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         else if (p == "TOGGLE") overrideRelay[i] = (overrideRelay[i] == 1 ? 0 : 1);
       }
     }
-  } else if (t == base + "/shutter/set") {
-    if (p == "OPEN" || p == "UP") shRt.manual = MC_UP;
-    else if (p == "CLOSE" || p == "DOWN") shRt.manual = MC_DOWN;
-    else if (p == "STOP") shRt.manual = MC_STOP;
+  } else if (t.startsWith(base + "/shutter/") && t.endsWith("/set")) {
+    int idx = t.substring((base + "/shutter/").length()).toInt();
+    if (idx >= 1 && idx <= SHUTTER_MAX) {
+      int s = idx - 1;
+      if (p == "OPEN" || p == "UP") shRt[s].manual = MC_UP;
+      else if (p == "CLOSE" || p == "DOWN") shRt[s].manual = MC_DOWN;
+      else if (p == "STOP") shRt[s].manual = MC_STOP;
+    }
   }
 }
 
@@ -655,10 +723,12 @@ static void mqttSetup() {
 
 static void mqttSubscribeTopics() {
   String base = mqttBaseTopic();
-  for (int i = 1; i <= 4; i++) {
+  for (int i = 1; i <= totalRelays; i++) {
     mqttClient.subscribe((base + "/relay/" + String(i) + "/set").c_str());
   }
-  mqttClient.subscribe((base + "/shutter/set").c_str());
+  for (int s = 1; s <= SHUTTER_MAX; s++) {
+    mqttClient.subscribe((base + "/shutter/" + String(s) + "/set").c_str());
+  }
 }
 
 static void mqttEnsureConnected() {
@@ -700,103 +770,125 @@ static void mqttLoop() {
   }
 
   String base = mqttBaseTopic();
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < totalInputs; i++) {
     if (inputs[i] != lastInputsPub[i]) {
       mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
       lastInputsPub[i] = inputs[i];
     }
+  }
+  for (int i = 0; i < totalRelays; i++) {
     if (relays[i] != lastRelaysPub[i]) {
       mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
       lastRelaysPub[i] = relays[i];
     }
   }
 
-  if (shCfg.enabled && (int)shRt.move != lastShutterMove) {
-    const char* st = (shRt.move==SH_UP ? "opening" : (shRt.move==SH_DOWN ? "closing" : "stopped"));
-    mqttPublish(base + "/shutter/state", String(st), mqttCfg.retain);
-    lastShutterMove = (int)shRt.move;
+  for (int s = 0; s < SHUTTER_MAX; s++) {
+    if (!shCfg[s].enabled) continue;
+    if ((int)shRt[s].move != lastShutterMove[s]) {
+      const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
+      mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
+      lastShutterMove[s] = (int)shRt[s].move;
+    }
   }
 }
 
-static bool inRange14(int v){ return v>=1 && v<=4; }
+static bool inRangeInput(int v){ return v>=1 && v<=totalInputs; }
+static bool inRangeRelay(int v){ return v>=1 && v<=totalRelays; }
 
 static void clearReservations() {
-  for(int i=0;i<4;i++) reservedByShutter[i] = false;
+  for(int i=0;i<MAX_RELAYS;i++) reservedByShutter[i] = false;
 }
 
 static void applyReservationsFromConfig() {
   clearReservations();
-  if(!shCfg.enabled) return;
-  if(inRange14(shCfg.up_relay)) reservedByShutter[shCfg.up_relay-1] = true;
-  if(inRange14(shCfg.down_relay)) reservedByShutter[shCfg.down_relay-1] = true;
+  for (int s = 0; s < SHUTTER_MAX; s++) {
+    if(!shCfg[s].enabled) continue;
+    if(inRangeRelay(shCfg[s].up_relay)) reservedByShutter[shCfg[s].up_relay-1] = true;
+    if(inRangeRelay(shCfg[s].down_relay)) reservedByShutter[shCfg[s].down_relay-1] = true;
+  }
 }
 
 static bool parseShutterFromRules(JsonArray shutters, String &errMsg) {
-  shCfg = ShutterCfg();
-  shRt = ShutterRuntime();
+  for(int i=0;i<SHUTTER_MAX;i++){
+    shCfg[i] = ShutterCfg();
+    shRt[i] = ShutterRuntime();
+    shCfg[i].enabled = false;
+  }
 
   if(!shutters || shutters.size()==0){
-    shCfg.enabled = false;
     applyReservationsFromConfig();
     return true;
   }
 
-  // On gère 1 volet (shutters[0]) pour l’instant
-  JsonObject s0 = shutters[0].as<JsonObject>();
-  if(!s0){
-    shCfg.enabled = false;
-    applyReservationsFromConfig();
-    return true;
+  int count = (int)shutters.size();
+  if(count > SHUTTER_MAX) count = SHUTTER_MAX;
+
+  for(int s=0; s<count; s++){
+    JsonObject so = shutters[s].as<JsonObject>();
+    if(!so) continue;
+
+    shCfg[s].enabled = true;
+    shCfg[s].name = (const char*)(so["name"] | (s==0 ? "Volet 1" : "Volet 2"));
+
+    shCfg[s].up_in = (uint8_t)(int)(so["up_in"] | 1);
+    shCfg[s].down_in = (uint8_t)(int)(so["down_in"] | 2);
+    shCfg[s].up_relay = (uint8_t)(int)(so["up_relay"] | (s==0 ? 1 : 3));
+    shCfg[s].down_relay = (uint8_t)(int)(so["down_relay"] | (s==0 ? 2 : 4));
+
+    shCfg[s].mode = (const char*)(so["mode"] | "hold");
+    shCfg[s].priority = (const char*)(so["priority"] | "stop");
+
+    shCfg[s].deadtime_ms = (uint32_t)(uint64_t)(so["deadtime_ms"] | 400);
+    shCfg[s].max_run_ms  = (uint32_t)(uint64_t)(so["max_run_ms"] | 25000);
+
+    if(!inRangeInput(shCfg[s].up_in) || !inRangeInput(shCfg[s].down_in)){
+      errMsg = String("shutter ") + String(s+1) + ": up_in/down_in out of range";
+      return false;
+    }
+    if(!inRangeRelay(shCfg[s].up_relay) || !inRangeRelay(shCfg[s].down_relay)){
+      errMsg = String("shutter ") + String(s+1) + ": up_relay/down_relay out of range";
+      return false;
+    }
+    if(shCfg[s].up_relay == shCfg[s].down_relay){
+      errMsg = String("shutter ") + String(s+1) + ": up_relay and down_relay must be different";
+      return false;
+    }
+    if(!(shCfg[s].mode=="hold" || shCfg[s].mode=="toggle")){
+      errMsg = String("shutter ") + String(s+1) + ": mode must be hold|toggle";
+      return false;
+    }
+    if(!(shCfg[s].priority=="stop" || shCfg[s].priority=="up" || shCfg[s].priority=="down")){
+      errMsg = String("shutter ") + String(s+1) + ": priority must be stop|up|down";
+      return false;
+    }
+    if(shCfg[s].deadtime_ms > 60000) shCfg[s].deadtime_ms = 60000;
+    if(shCfg[s].max_run_ms > 600000) shCfg[s].max_run_ms = 600000;
   }
 
-  shCfg.enabled = true;
-  shCfg.name = (const char*)(s0["name"] | "Volet");
-
-  shCfg.up_in = (uint8_t)(int)(s0["up_in"] | 1);
-  shCfg.down_in = (uint8_t)(int)(s0["down_in"] | 2);
-  shCfg.up_relay = (uint8_t)(int)(s0["up_relay"] | 1);
-  shCfg.down_relay = (uint8_t)(int)(s0["down_relay"] | 2);
-
-  shCfg.mode = (const char*)(s0["mode"] | "hold");
-  shCfg.priority = (const char*)(s0["priority"] | "stop");
-
-  shCfg.deadtime_ms = (uint32_t)(uint64_t)(s0["deadtime_ms"] | 400);
-  shCfg.max_run_ms  = (uint32_t)(uint64_t)(s0["max_run_ms"] | 25000);
-
-  // validation stricte
-  if(!inRange14(shCfg.up_in) || !inRange14(shCfg.down_in)){
-    errMsg = "shutter: up_in/down_in must be 1..4";
-    return false;
+  // check relay conflicts between shutters
+  for(int a=0;a<SHUTTER_MAX;a++){
+    if(!shCfg[a].enabled) continue;
+    for(int b=a+1;b<SHUTTER_MAX;b++){
+      if(!shCfg[b].enabled) continue;
+      if(shCfg[a].up_relay==shCfg[b].up_relay || shCfg[a].up_relay==shCfg[b].down_relay ||
+         shCfg[a].down_relay==shCfg[b].up_relay || shCfg[a].down_relay==shCfg[b].down_relay){
+        errMsg = "shutters conflict: relays overlap";
+        return false;
+      }
+    }
   }
-  if(!inRange14(shCfg.up_relay) || !inRange14(shCfg.down_relay)){
-    errMsg = "shutter: up_relay/down_relay must be 1..4";
-    return false;
-  }
-  if(shCfg.up_relay == shCfg.down_relay){
-    errMsg = "shutter: up_relay and down_relay must be different";
-    return false;
-  }
-  if(!(shCfg.mode=="hold" || shCfg.mode=="toggle")){
-    errMsg = "shutter: mode must be hold|toggle";
-    return false;
-  }
-  if(!(shCfg.priority=="stop" || shCfg.priority=="up" || shCfg.priority=="down")){
-    errMsg = "shutter: priority must be stop|up|down";
-    return false;
-  }
-  if(shCfg.deadtime_ms > 60000) shCfg.deadtime_ms = 60000;
-  if(shCfg.max_run_ms > 600000) shCfg.max_run_ms = 600000; // 10min max sécurité
 
   applyReservationsFromConfig();
   return true;
 }
 
-static bool getInputN(int n){ // n = 1..4
-  if(n < 1 || n > 4) return false;
+static bool getInputN(int n){ // n = 1..totalInputs
+  if(n < 1 || n > totalInputs) return false;
   return inputs[n-1];
 }
 
-static void shutterSetOutputs(ShutterMove m) {
+static void shutterSetOutputs(int s, ShutterMove m) {
   // sécurité absolue: jamais les deux
   bool up = (m == SH_UP);
   bool dn = (m == SH_DOWN);
@@ -806,62 +898,59 @@ static void shutterSetOutputs(ShutterMove m) {
     up = false; dn = false; m = SH_STOP;
   }
 
-  // écrire dans relayFromShutter sur les relais réservés
-  for(int i=0;i<4;i++) relayFromShutter[i] = false;
-  if(!shCfg.enabled) return;
-
-  relayFromShutter[shCfg.up_relay-1] = up;
-  relayFromShutter[shCfg.down_relay-1] = dn;
+  if(!shCfg[s].enabled) return;
+  relayFromShutter[shCfg[s].up_relay-1] = up;
+  relayFromShutter[shCfg[s].down_relay-1] = dn;
 }
 
-static void shutterForceStop() {
-  shRt.move = SH_STOP;
-  shRt.manual = MC_NONE; // option: STOP efface le manuel
-  shutterSetOutputs(SH_STOP);
+static void shutterForceStop(int s) {
+  shRt[s].move = SH_STOP;
+  shRt[s].manual = MC_NONE;
+  shutterSetOutputs(s, SH_STOP);
 }
 
-static void shutterCommand(ShutterMove req) {
+static void shutterCommand(int s, ShutterMove req) {
   // gestion dead-time entre inversions
   uint32_t now = millis();
 
   if(req == SH_STOP){
-    shRt.move = SH_STOP;
-    shutterSetOutputs(SH_STOP);
+    shRt[s].move = SH_STOP;
+    shutterSetOutputs(s, SH_STOP);
     return;
   }
 
   // si cooldown actif, on reste STOP jusqu’à expiration
-  if(now < shRt.cooldownUntilMs){
-    shRt.move = SH_STOP;
-    shutterSetOutputs(SH_STOP);
+  if(now < shRt[s].cooldownUntilMs){
+    shRt[s].move = SH_STOP;
+    shutterSetOutputs(s, SH_STOP);
     return;
   }
 
   // si changement de sens alors qu’on bouge -> passer STOP + cooldown
-  if(shRt.move != SH_STOP && shRt.move != req){
-    shRt.move = SH_STOP;
-    shutterSetOutputs(SH_STOP);
-    shRt.cooldownUntilMs = now + shCfg.deadtime_ms;
+  if(shRt[s].move != SH_STOP && shRt[s].move != req){
+    shRt[s].move = SH_STOP;
+    shutterSetOutputs(s, SH_STOP);
+    shRt[s].cooldownUntilMs = now + shCfg[s].deadtime_ms;
     return; // la prochaine itération autorisera req après cooldown
   }
 
   // sinon, démarrer/continuer
-  if(shRt.move != req){
-    shRt.move = req;
-    shRt.moveStartMs = now;
+  if(shRt[s].move != req){
+    shRt[s].move = req;
+    shRt[s].moveStartMs = now;
   }
 
-  shutterSetOutputs(req);
+  shutterSetOutputs(s, req);
 }
 
-static ShutterMove shutterComputeDemandFromButtons() {
-  bool upBtn = getInputN(shCfg.up_in);
-  bool dnBtn = getInputN(shCfg.down_in);
+static ShutterMove shutterComputeDemandFromButtons(int s) {
+  bool upBtn = getInputN(shCfg[s].up_in);
+  bool dnBtn = getInputN(shCfg[s].down_in);
 
   // priorité si les deux
   if(upBtn && dnBtn){
-    if(shCfg.priority=="up") return SH_UP;
-    if(shCfg.priority=="down") return SH_DOWN;
+    if(shCfg[s].priority=="up") return SH_UP;
+    if(shCfg[s].priority=="down") return SH_DOWN;
     return SH_STOP; // stop
   }
   if(upBtn) return SH_UP;
@@ -869,76 +958,70 @@ static ShutterMove shutterComputeDemandFromButtons() {
   return SH_STOP;
 }
 
-static void shutterTick() {
-  // clear outputs if disabled
-  if(!shCfg.enabled){
-    for(int i=0;i<4;i++) relayFromShutter[i] = false;
-    return;
-  }
+static void shutterTickOne(int s) {
+  if(!shCfg[s].enabled) return;
 
   uint32_t now = millis();
 
-  // sécurité max-run
-  if(shCfg.max_run_ms > 0 && shRt.move != SH_STOP){
-    if(now - shRt.moveStartMs >= shCfg.max_run_ms){
-      shutterForceStop();
+  if(shCfg[s].max_run_ms > 0 && shRt[s].move != SH_STOP){
+    if(now - shRt[s].moveStartMs >= shCfg[s].max_run_ms){
+      shutterForceStop(s);
       return;
     }
   }
 
-  // demande depuis API manual (si active)
-  // MC_UP / MC_DOWN persistent jusqu’à MC_STOP ou max_run
   ShutterMove demand = SH_STOP;
 
-  if(shRt.manual == MC_STOP){
-    shutterForceStop();
+  if(shRt[s].manual == MC_STOP){
+    shutterForceStop(s);
     return;
   }
-  if(shRt.manual == MC_UP) demand = SH_UP;
-  else if(shRt.manual == MC_DOWN) demand = SH_DOWN;
+  if(shRt[s].manual == MC_UP) demand = SH_UP;
+  else if(shRt[s].manual == MC_DOWN) demand = SH_DOWN;
   else {
-    // mode selon cfg
-    if(shCfg.mode == "hold"){
-      demand = shutterComputeDemandFromButtons();
+    if(shCfg[s].mode == "hold"){
+      demand = shutterComputeDemandFromButtons(s);
     } else {
-      // toggle : front montant sur up ou down
-      bool upBtn = getInputN(shCfg.up_in);
-      bool dnBtn = getInputN(shCfg.down_in);
+      bool upBtn = getInputN(shCfg[s].up_in);
+      bool dnBtn = getInputN(shCfg[s].down_in);
 
-      bool upRise = upBtn && !shRt.lastUpBtn;
-      bool dnRise = dnBtn && !shRt.lastDownBtn;
+      bool upRise = upBtn && !shRt[s].lastUpBtn;
+      bool dnRise = dnBtn && !shRt[s].lastDownBtn;
 
-      shRt.lastUpBtn = upBtn;
-      shRt.lastDownBtn = dnBtn;
+      shRt[s].lastUpBtn = upBtn;
+      shRt[s].lastDownBtn = dnBtn;
 
-      // si les deux rises simultanés -> STOP (sécurité)
       if(upRise && dnRise){
         demand = SH_STOP;
-        shutterCommand(SH_STOP);
+        shutterCommand(s, SH_STOP);
         return;
       }
 
       if(upRise){
-        if(shRt.move == SH_UP) demand = SH_STOP;
+        if(shRt[s].move == SH_UP) demand = SH_STOP;
         else demand = SH_UP;
       } else if(dnRise){
-        if(shRt.move == SH_DOWN) demand = SH_STOP;
+        if(shRt[s].move == SH_DOWN) demand = SH_STOP;
         else demand = SH_DOWN;
       } else {
-        // pas de nouvel évènement : garder l’état courant
-        demand = shRt.move;
+        demand = shRt[s].move;
       }
     }
   }
 
-  // en mode hold, si aucun bouton et pas manuel -> STOP
-  if(shCfg.mode=="hold" && shRt.manual==MC_NONE){
-    shutterCommand(demand);
+  if(shCfg[s].mode=="hold" && shRt[s].manual==MC_NONE){
+    shutterCommand(s, demand);
     return;
   }
 
-  // toggle / manuel : appliquer demand
-  shutterCommand(demand);
+  shutterCommand(s, demand);
+}
+
+static void shutterTick() {
+  for(int i=0;i<MAX_RELAYS;i++) relayFromShutter[i] = false;
+  for(int s=0; s<SHUTTER_MAX; s++){
+    shutterTickOne(s);
+  }
 }
 
 // ===============================================================
@@ -997,7 +1080,7 @@ static bool evalExprSimple(int relayIndex, JsonObject expr) {
   if(strcmp(op,"TOGGLE_RISE")==0){
     int in = expr["in"] | 1;
     bool thisRise = false;
-    if(in>=1 && in<=4){
+    if(in>=1 && in<=totalInputs){
       thisRise = (inputs[in-1] && !prevInputs[in-1]);
     }
     if(thisRise) toggleState[relayIndex] = !toggleState[relayIndex];
@@ -1007,7 +1090,7 @@ static bool evalExprSimple(int relayIndex, JsonObject expr) {
     int in = expr["in"] | 1;
     uint32_t pulseMs = expr["pulseMs"] | 200;
     bool thisRise = false;
-    if(in>=1 && in<=4){
+    if(in>=1 && in<=totalInputs){
       thisRise = (inputs[in-1] && !prevInputs[in-1]);
     }
     if(thisRise){
@@ -1021,7 +1104,7 @@ static bool evalExprSimple(int relayIndex, JsonObject expr) {
 
 static void evalSimpleRules() {
   JsonArray rel = rulesDoc["relays"].as<JsonArray>();
-  for(int i=0;i<4;i++){
+  for(int i=0;i<totalRelays;i++){
     bool desired = false;
 
     if(rel && i < (int)rel.size()){
@@ -1044,31 +1127,32 @@ static void evalSimpleRules() {
 
 static void buildFinalRelays() {
   // 1) base = simple rules
-  for(int i=0;i<4;i++){
+  for(int i=0;i<totalRelays;i++){
     relays[i] = relayFromSimple[i];
   }
 
   // 2) apply shutter ownership: for each reserved relay, shutter output wins
-  if(shCfg.enabled){
-    // garantie interlock déjà dans shutterSetOutputs()
-    relays[shCfg.up_relay-1]   = relayFromShutter[shCfg.up_relay-1];
-    relays[shCfg.down_relay-1] = relayFromShutter[shCfg.down_relay-1];
+  for(int s=0; s<SHUTTER_MAX; s++){
+    if(!shCfg[s].enabled) continue;
+    relays[shCfg[s].up_relay-1]   = relayFromShutter[shCfg[s].up_relay-1];
+    relays[shCfg[s].down_relay-1] = relayFromShutter[shCfg[s].down_relay-1];
   }
 
   // 3) apply override ONLY for non-reserved relays
-  for(int i=0;i<4;i++){
+  for(int i=0;i<totalRelays;i++){
     if(reservedByShutter[i]) continue; // PROTECTION: cannot override shutter relays
     if(overrideRelay[i] == -1) continue;
     relays[i] = (overrideRelay[i] == 1);
   }
 
   // 4) final safety (absolute): if shutter relays both ON => STOP both
-  if(shCfg.enabled){
-    bool up = relays[shCfg.up_relay-1];
-    bool dn = relays[shCfg.down_relay-1];
+  for(int s=0; s<SHUTTER_MAX; s++){
+    if(!shCfg[s].enabled) continue;
+    bool up = relays[shCfg[s].up_relay-1];
+    bool dn = relays[shCfg[s].down_relay-1];
     if(up && dn){
-      relays[shCfg.up_relay-1] = false;
-      relays[shCfg.down_relay-1] = false;
+      relays[shCfg[s].up_relay-1] = false;
+      relays[shCfg[s].down_relay-1] = false;
     }
   }
 }
@@ -1112,14 +1196,16 @@ static void sendText(EthernetClient& c, const String& body, const char* ctype, i
 }
 
 static void sendJsonState(EthernetClient& c){
-  DynamicJsonDocument doc(768);
+  DynamicJsonDocument doc(2048);
   JsonArray inA = doc.createNestedArray("inputs");
   JsonArray reA = doc.createNestedArray("relays");
   JsonArray ovA = doc.createNestedArray("override");
   JsonArray rsA = doc.createNestedArray("reserved");
 
-  for(int i=0;i<4;i++){
+  for(int i=0;i<totalInputs;i++){
     inA.add(inputs[i] ? 1 : 0);
+  }
+  for(int i=0;i<totalRelays;i++){
     reA.add(relays[i] ? 1 : 0);
     ovA.add(overrideRelay[i]);
     rsA.add(reservedByShutter[i] ? 1 : 0);
@@ -1130,15 +1216,33 @@ static void sendJsonState(EthernetClient& c){
   eth["ip"] = Ethernet.localIP().toString();
 
   JsonObject sh = doc.createNestedObject("shutter");
-  sh["enabled"] = shCfg.enabled ? 1 : 0;
-  if(shCfg.enabled){
-    sh["name"] = shCfg.name;
-    sh["up_relay"] = shCfg.up_relay;
-    sh["down_relay"] = shCfg.down_relay;
-    sh["move"] = (shRt.move==SH_UP ? "up" : (shRt.move==SH_DOWN ? "down" : "stop"));
-    sh["cooldown_ms"] = (millis() < shRt.cooldownUntilMs) ? (uint32_t)(shRt.cooldownUntilMs - millis()) : 0;
+  sh["enabled"] = shCfg[0].enabled ? 1 : 0;
+  if(shCfg[0].enabled){
+    sh["name"] = shCfg[0].name;
+    sh["up_relay"] = shCfg[0].up_relay;
+    sh["down_relay"] = shCfg[0].down_relay;
+    sh["move"] = (shRt[0].move==SH_UP ? "up" : (shRt[0].move==SH_DOWN ? "down" : "stop"));
+    sh["cooldown_ms"] = (millis() < shRt[0].cooldownUntilMs) ? (uint32_t)(shRt[0].cooldownUntilMs - millis()) : 0;
   }
 
+  JsonArray shA = doc.createNestedArray("shutters");
+  for(int s=0; s<SHUTTER_MAX; s++){
+    JsonObject o = shA.createNestedObject();
+    o["enabled"] = shCfg[s].enabled ? 1 : 0;
+    if(shCfg[s].enabled){
+      o["name"] = shCfg[s].name;
+      o["up_relay"] = shCfg[s].up_relay;
+      o["down_relay"] = shCfg[s].down_relay;
+      o["move"] = (shRt[s].move==SH_UP ? "up" : (shRt[s].move==SH_DOWN ? "down" : "stop"));
+      o["cooldown_ms"] = (millis() < shRt[s].cooldownUntilMs) ? (uint32_t)(shRt[s].cooldownUntilMs - millis()) : 0;
+    }
+  }
+
+  doc["modules"] = pcaCount;
+  doc["relays_per"] = RELAYS_PER_MODULE;
+  doc["inputs_per"] = INPUTS_PER_MODULE;
+  doc["total_relays"] = totalRelays;
+  doc["total_inputs"] = totalInputs;
   doc["uptime_ms"] = (uint32_t)millis();
 
   String out; serializeJson(doc, out);
@@ -1165,7 +1269,7 @@ static void sendJsonBackup(EthernetClient& c){
   loadNetCfg();
   loadMqttCfg();
 
-  DynamicJsonDocument doc(6144);
+  DynamicJsonDocument doc(12288);
   doc["rules"] = rulesDoc;
 
   JsonObject net = doc.createNestedObject("net");
@@ -1284,9 +1388,9 @@ static void ethernetPrintInfo() {
 // Validation PUT /api/rules + apply shutter cfg/reservations
 // ===============================================================
 static bool validateAndApplyRulesDoc(DynamicJsonDocument &candidate, String &errMsg) {
-  // relays must be array size 4
-  if(!candidate["relays"].is<JsonArray>() || candidate["relays"].as<JsonArray>().size()!=4){
-    errMsg = "relays must be array size 4";
+  // relays must be array size = totalRelays
+  if(!candidate["relays"].is<JsonArray>() || candidate["relays"].as<JsonArray>().size()!=totalRelays){
+    errMsg = String("relays must be array size ") + String(totalRelays);
     return false;
   }
   // shutters optional, but if present must be array
@@ -1321,7 +1425,7 @@ static void rebuildRuntimeFromRules() {
   if(!parseShutterFromRules(rulesDoc["shutters"].as<JsonArray>(), err)){
     // si règles en flash sont invalides, on désactive le volet par sécurité
     Serial.printf("[SHUTTER] invalid rules: %s -> DISABLE shutter\n", err.c_str());
-    shCfg.enabled = false;
+    for(int s=0; s<SHUTTER_MAX; s++) shCfg[s].enabled = false;
     applyReservationsFromConfig();
   }
   mqttAnnounced = false;
@@ -1446,7 +1550,7 @@ static void handleHttp(){
   }
   else if(method=="PUT" && path=="/api/backup"){
     String body = readBody(client, contentLen);
-    DynamicJsonDocument tmp(6144);
+    DynamicJsonDocument tmp(12288);
     auto err = deserializeJson(tmp, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1455,7 +1559,7 @@ static void handleHttp(){
         sendText(client, String("{\"ok\":false,\"error\":\"backup must contain rules, net, mqtt\"}"), "application/json", 400);
       } else {
         String msg;
-        DynamicJsonDocument rulesTmp(3072);
+        DynamicJsonDocument rulesTmp(8192);
         rulesTmp.set(tmp["rules"]);
         if(!validateAndApplyRulesDoc(rulesTmp, msg)){
           DynamicJsonDocument e(256);
@@ -1487,7 +1591,7 @@ static void handleHttp(){
   else if(method=="PUT" && path=="/api/rules"){
     String body = readBody(client, contentLen);
 
-    DynamicJsonDocument tmp(3072);
+    DynamicJsonDocument tmp(8192);
     auto err = deserializeJson(tmp, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1520,10 +1624,10 @@ static void handleHttp(){
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
-      int r = doc["relay"] | 1; // 1..4
+      int r = doc["relay"] | 1; // 1..totalRelays
       const char* mode = doc["mode"] | "AUTO";
-      if(r < 1 || r > 4){
-        sendText(client, String("{\"ok\":false,\"error\":\"relay must be 1..4\"}"), "application/json", 400);
+      if(r < 1 || r > totalRelays){
+        sendText(client, String("{\"ok\":false,\"error\":\"relay out of range\"}"), "application/json", 400);
       } else {
         int idx = r-1;
         if(reservedByShutter[idx]){
@@ -1543,7 +1647,7 @@ static void handleHttp(){
     }
   }
   else if(method=="POST" && path=="/api/shutter"){
-    // Commande volet: { "cmd":"UP|DOWN|STOP" }
+    // Commande volet: { "id":1|2, "cmd":"UP|DOWN|STOP|AUTO" }
     String body = readBody(client, contentLen);
     DynamicJsonDocument doc(256);
     auto err = deserializeJson(doc, body);
@@ -1551,20 +1655,23 @@ static void handleHttp(){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
       const char* cmd = doc["cmd"] | "STOP";
-      if(!shCfg.enabled){
+      int sid = doc["id"] | 1;
+      if(sid < 1 || sid > SHUTTER_MAX){
+        sendText(client, String("{\"ok\":false,\"error\":\"id must be 1..2\"}"), "application/json", 400);
+      } else if(!shCfg[sid-1].enabled){
         sendText(client, String("{\"ok\":false,\"error\":\"no shutter configured\"}"), "application/json", 400);
       } else if(strcmp(cmd,"UP")==0){
-        shRt.manual = MC_UP;
+        shRt[sid-1].manual = MC_UP;
         sendText(client, String("{\"ok\":true}"), "application/json");
       } else if(strcmp(cmd,"DOWN")==0){
-        shRt.manual = MC_DOWN;
+        shRt[sid-1].manual = MC_DOWN;
         sendText(client, String("{\"ok\":true}"), "application/json");
       } else if(strcmp(cmd,"STOP")==0){
-        shRt.manual = MC_STOP;
+        shRt[sid-1].manual = MC_STOP;
         sendText(client, String("{\"ok\":true}"), "application/json");
       } else if(strcmp(cmd,"AUTO")==0){
         // option: rendre la main aux boutons (désactive le manuel)
-        shRt.manual = MC_NONE;
+        shRt[sid-1].manual = MC_NONE;
         sendText(client, String("{\"ok\":true}"), "application/json");
       } else {
         sendText(client, String("{\"ok\":false,\"error\":\"cmd must be UP|DOWN|STOP|AUTO\"}"), "application/json", 400);
@@ -1605,13 +1712,10 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
 
-  // PCA9538
-  Serial.printf("[PCA9538] addr=0x%02X init...\n", PCA_ADDR);
-  if(!pcaInit()){
-    Serial.println("[PCA9538] INIT FAILED (wiring/pullups/address)");
-  } else {
-    Serial.println("[PCA9538] INIT OK");
-  }
+  // PCA9538 (scan 0x70..0x73)
+  Serial.printf("[PCA9538] scan 0x%02X..0x%02X\n", PCA_BASE_ADDR, PCA_BASE_ADDR + PCA_MAX_MODULES - 1);
+  pcaScanAndInit();
+  Serial.printf("[PCA9538] modules found=%u (relays=%u inputs=%u)\n", pcaCount, totalRelays, totalInputs);
 
   // Rules
   loadRulesFromFS();
@@ -1619,6 +1723,7 @@ void setup() {
 
   // Ethernet
   loadNetCfg();
+  buildEthernetMac();
   applyNetCfg();
   ethernetPrintInfo();
 
@@ -1653,17 +1758,19 @@ void loop() {
   mqttLoop();
 
   // update prev inputs for edge-based rules/toggle/pulse
-  for(int k=0;k<4;k++) prevInputs[k] = inputs[k];
+  for(int k=0;k<totalInputs;k++) prevInputs[k] = inputs[k];
 
   // 1Hz log
   static uint32_t t0 = 0;
   if(millis() - t0 > 1000){
     t0 = millis();
-    Serial.printf("[STATE] E=%d%d%d%d  R=%d%d%d%d  RES=%d%d%d%d  SH=%s\n",
-      (int)inputs[0],(int)inputs[1],(int)inputs[2],(int)inputs[3],
-      (int)relays[0],(int)relays[1],(int)relays[2],(int)relays[3],
-      (int)reservedByShutter[0],(int)reservedByShutter[1],(int)reservedByShutter[2],(int)reservedByShutter[3],
-      shCfg.enabled ? (shRt.move==SH_UP?"UP":(shRt.move==SH_DOWN?"DOWN":"STOP")) : "DISABLED"
+    String e, r, res;
+    for(int i=0;i<totalInputs;i++) e += String(inputs[i] ? 1 : 0);
+    for(int i=0;i<totalRelays;i++) r += String(relays[i] ? 1 : 0);
+    for(int i=0;i<totalRelays;i++) res += String(reservedByShutter[i] ? 1 : 0);
+    Serial.printf("[STATE] E=%s  R=%s  RES=%s  SH=%s\n",
+      e.c_str(), r.c_str(), res.c_str(),
+      shCfg[0].enabled ? (shRt[0].move==SH_UP?"UP":(shRt[0].move==SH_DOWN?"DOWN":"STOP")) : "DISABLED"
     );
   }
 
