@@ -240,6 +240,54 @@
       <button class="primary" onclick="saveNet()">Sauver réseau</button>
       <span class="muted" id="net_hint"></span>
     </div>
+
+    <div class="card" style="max-width:640px;margin-top:12px;">
+      <h3>MQTT / Home Assistant</h3>
+      <div class="muted">Configuration du broker + topics. Auto-découverte Home Assistant.</div>
+      <div class="sep"></div>
+
+      <div class="inline">
+        <span id="mqtt_status" class="pill">MQTT: ?</span>
+      </div>
+
+      <div class="inline">
+        <label><input id="mqtt_enabled" type="checkbox"> Activer MQTT</label>
+      </div>
+
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">Broker</span>
+        <input id="mqtt_host" type="text" placeholder="192.168.1.43">
+        <span class="muted">Port</span>
+        <input id="mqtt_port" type="number" min="1" max="65535" value="1883">
+      </div>
+
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">User</span>
+        <input id="mqtt_user" type="text" placeholder="">
+        <span class="muted">Pass</span>
+        <input id="mqtt_pass" type="text" placeholder="">
+      </div>
+
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">Client ID</span>
+        <input id="mqtt_client" type="text" placeholder="ESPRelay4">
+      </div>
+
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">Base topic</span>
+        <input id="mqtt_base" type="text" placeholder="esprelay4">
+      </div>
+
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted">Discovery prefix</span>
+        <input id="mqtt_disc" type="text" placeholder="homeassistant">
+        <label><input id="mqtt_retain" type="checkbox" checked> Retain</label>
+      </div>
+
+      <div class="sep"></div>
+      <button class="primary" onclick="saveMqtt()">Sauver MQTT</button>
+      <span class="muted" id="mqtt_hint"></span>
+    </div>
   </div>
 
 <script>
@@ -265,7 +313,7 @@ function switchTab(name){
     document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
   }
   if(name === "prog" && rules) renderSimpleRules();
-  if(name === "net") loadNet();
+  if(name === "net") { loadNet(); loadMqtt(); }
 }
 document.querySelectorAll(".tab").forEach(el=>{
   el.addEventListener("click", ()=>switchTab(el.dataset.tab));
@@ -289,11 +337,15 @@ const postOverride = (relay, mode)=>apiJson("/api/override",{method:"POST",heade
 const postShutter = (cmd)=>apiJson("/api/shutter",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cmd})});
 const getNet = ()=>apiJson("/api/net");
 const putNet = (body)=>apiJson("/api/net",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const getMqtt = ()=>apiJson("/api/mqtt");
+const putMqtt = (body)=>apiJson("/api/mqtt",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 
 // -------- data model --------
 let rules = null;
 let lastState = null;
 let netCfg = null;
+let mqttCfg = null;
+let mqttDirty = false;
 
 function defaultRules(){
   return {
@@ -695,6 +747,71 @@ async function saveNet(){
 
 $("net_mode").addEventListener("change", updateNetUiState);
 
+// -------- MQTT config --------
+function setMqttUI(cfg){
+  $("mqtt_enabled").checked = !!cfg.enabled;
+  $("mqtt_host").value = cfg.host || "192.168.1.43";
+  $("mqtt_port").value = cfg.port || 1883;
+  $("mqtt_user").value = cfg.user || "";
+  $("mqtt_pass").value = cfg.pass || "";
+  $("mqtt_client").value = cfg.client_id || "ESPRelay4";
+  $("mqtt_base").value = cfg.base || "esprelay4";
+  $("mqtt_disc").value = cfg.discovery_prefix || "homeassistant";
+  $("mqtt_retain").checked = cfg.retain !== 0;
+  const status = cfg.connected ? "Connecté" : "Déconnecté";
+  $("mqtt_status").textContent = `MQTT: ${status}`;
+  $("mqtt_hint").textContent = cfg.enabled ? "" : "MQTT désactivé";
+  mqttDirty = false;
+}
+
+function readMqttUI(){
+  return {
+    enabled: $("mqtt_enabled").checked ? 1 : 0,
+    host: $("mqtt_host").value.trim(),
+    port: Number($("mqtt_port").value||1883),
+    user: $("mqtt_user").value.trim(),
+    pass: $("mqtt_pass").value.trim(),
+    client_id: $("mqtt_client").value.trim(),
+    base: $("mqtt_base").value.trim(),
+    discovery_prefix: $("mqtt_disc").value.trim(),
+    retain: $("mqtt_retain").checked ? 1 : 0
+  };
+}
+
+async function loadMqtt(){
+  try{
+    mqttCfg = await getMqtt();
+    if(!mqttCfg || mqttCfg.host === undefined){
+      mqttCfg = {
+        enabled:0, host:"192.168.1.43", port:1883, user:"", pass:"",
+        client_id:"ESPRelay4", base:"esprelay4", discovery_prefix:"homeassistant", retain:1
+      };
+    }
+    if(!mqttDirty) setMqttUI(mqttCfg);
+    else {
+      const status = mqttCfg.connected ? "Connecté" : "Déconnecté";
+      $("mqtt_status").textContent = `MQTT: ${status}`;
+    }
+  }catch(e){
+    toast("GET /api/mqtt indisponible", false);
+  }
+}
+
+async function saveMqtt(){
+  try{
+    const body = readMqttUI();
+    await putMqtt(body);
+    toast("MQTT sauvegardé");
+    mqttDirty = false;
+    await loadMqtt();
+  }catch(e){
+    toast(e.message, false);
+  }
+}
+
+["mqtt_enabled","mqtt_host","mqtt_port","mqtt_user","mqtt_pass","mqtt_client","mqtt_base","mqtt_disc","mqtt_retain"]
+  .forEach(id => $(id).addEventListener("input", ()=>{ mqttDirty = true; }));
+
 async function loadRules(){
   try{
     rules = ensureRulesBase(await getRules());
@@ -747,6 +864,11 @@ setInterval(refreshState, 600);
 loadRules();
 refreshState();
 loadNet();
+loadMqtt();
+setInterval(()=>{
+  const netTab = $("tab-net");
+  if(netTab && !netTab.classList.contains("hide")) loadMqtt();
+}, 5000);
 </script>
 </body>
 </html>
