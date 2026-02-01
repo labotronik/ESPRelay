@@ -33,6 +33,7 @@
 static const uint8_t PIN_LED = 40;
 static const uint8_t PIN_ONEWIRE = 1;  // DS18B20 (IO1)
 static const uint8_t PIN_DHT = 2;      // DHT22 (IO2)
+static const uint8_t PIN_FACTORY = 0;  // IO0 factory reset button (hold 10s at boot)
 
 // I2C (PCA9538)
 static const int I2C_SDA = 8;     
@@ -149,6 +150,13 @@ static float dhtHum = NAN;
 static float lastDhtHumPub = NAN;
 static bool dhtCheckDone = false;
 
+struct AuthConfig {
+  String user;
+  String pass;
+};
+
+static AuthConfig authCfg = {"admin", "admin"};
+
 
 // ===================== Etat IO =====================
 bool inputs[MAX_INPUTS] = {0};
@@ -218,6 +226,73 @@ static bool writeFile(const char* path, const String& data) {
   f.print(data);
   f.close();
   return true;
+}
+
+// Auth config (LittleFS)
+static void authCfgToJson(String &out){
+  DynamicJsonDocument doc(192);
+  doc["user"] = authCfg.user;
+  doc["pass"] = authCfg.pass;
+  serializeJsonPretty(doc, out);
+}
+
+static bool saveAuthCfg(){
+  String out;
+  authCfgToJson(out);
+  return writeFile("/auth.json", out);
+}
+
+static bool loadAuthCfg(){
+  String s = readFile("/auth.json");
+  if(s.length() == 0){
+    saveAuthCfg();
+    Serial.println("[AUTH] created default /auth.json");
+    return true;
+  }
+  DynamicJsonDocument doc(192);
+  auto err = deserializeJson(doc, s);
+  if(err){
+    Serial.printf("[AUTH] JSON parse error -> keep default (%s)\n", err.c_str());
+    return false;
+  }
+  authCfg.user = String((const char*)(doc["user"] | "admin"));
+  authCfg.pass = String((const char*)(doc["pass"] | "admin"));
+  return true;
+}
+
+static bool factoryResetHeld(){
+  pinMode(PIN_FACTORY, INPUT_PULLUP);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, 0);
+  if(digitalRead(PIN_FACTORY) != LOW) return false;
+  uint32_t start = millis();
+  uint32_t lastBlink = start;
+  bool ledOn = false;
+  while(millis() - start < 10000){
+    if(digitalRead(PIN_FACTORY) != LOW) return false;
+    uint32_t now = millis();
+    if(now - lastBlink >= 250){
+      lastBlink = now;
+      ledOn = !ledOn;
+      digitalWrite(PIN_LED, ledOn ? 1 : 0);
+    }
+    delay(20);
+  }
+  digitalWrite(PIN_LED, 1);
+  return true;
+}
+
+static void doFactoryReset(){
+  Serial.println("[FACTORY] button held 10s -> reset config");
+  const char* files[] = {"/net.json", "/mqtt.json", "/rules.json", "/auth.json"};
+  for(size_t i=0;i<sizeof(files)/sizeof(files[0]);i++){
+    if(LittleFS.exists(files[i])){
+      LittleFS.remove(files[i]);
+      Serial.printf("[FACTORY] removed %s\n", files[i]);
+    }
+  }
+  delay(200);
+  ESP.restart();
 }
 
 // ===============================================================
@@ -1327,6 +1402,53 @@ static String readLine(EthernetClient& c){
   return s;
 }
 
+static void sendText(EthernetClient& c, const String& body, const char* ctype, int code);
+
+static String base64Decode(const String& in){
+  static int8_t table[256];
+  static bool inited = false;
+  if(!inited){
+    for(int i=0;i<256;i++) table[i] = -1;
+    const char* alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for(int i=0;i<64;i++) table[(uint8_t)alpha[i]] = i;
+    inited = true;
+  }
+  String out;
+  out.reserve((in.length()*3)/4);
+  int val = 0;
+  int valb = -8;
+  for(size_t i=0;i<in.length();i++){
+    int8_t c = table[(uint8_t)in[i]];
+    if(c < 0) continue;
+    val = (val<<6) + c;
+    valb += 6;
+    if(valb >= 0){
+      out += char((val>>valb) & 0xFF);
+      valb -= 8;
+    }
+  }
+  return out;
+}
+
+static bool checkAuthHeader(const String& authHeader){
+  if(authHeader.length() == 0) return false;
+  String h = authHeader;
+  h.trim();
+  if(!h.startsWith("Basic ")) return false;
+  String b64 = h.substring(6);
+  b64.trim();
+  String decoded = base64Decode(b64);
+  int sep = decoded.indexOf(':');
+  if(sep < 0) return false;
+  String user = decoded.substring(0, sep);
+  String pass = decoded.substring(sep+1);
+  return (user == authCfg.user && pass == authCfg.pass);
+}
+
+static void sendAuthRequired(EthernetClient& c){
+  sendText(c, String("{\"ok\":false,\"error\":\"auth required\"}"), "application/json", 401);
+}
+
 static String readBody(EthernetClient& c, int len){
   String b; b.reserve(len);
   while(len-- > 0){
@@ -1338,6 +1460,7 @@ static String readBody(EthernetClient& c, int len){
 
 static void sendText(EthernetClient& c, const String& body, const char* ctype, int code=200){
   if(code==200) c.println("HTTP/1.1 200 OK");
+  else if(code==401) c.println("HTTP/1.1 401 Unauthorized");
   else if(code==204) c.println("HTTP/1.1 204 No Content");
   else if(code==400) c.println("HTTP/1.1 400 Bad Request");
   else if(code==404) c.println("HTTP/1.1 404 Not Found");
@@ -1610,11 +1733,15 @@ static void handleHttp(){
   if(req.length()==0){ client.stop(); return; }
 
   int contentLen = 0;
+  String authHeader = "";
   while(true){
     String h = readLine(client);
     if(h.length()==0) break;
     if(h.startsWith("Content-Length:")){
       contentLen = h.substring(15).toInt();
+    }
+    if(h.startsWith("Authorization:")){
+      authHeader = h.substring(14);
     }
   }
 
@@ -1627,6 +1754,7 @@ static void handleHttp(){
   String query = "";
   int q = url.indexOf('?');
   if(q >= 0){ path = url.substring(0,q); query = url.substring(q+1); }
+  const bool authed = checkAuthHeader(authHeader);
 
   // -------- routes --------
   if(method=="GET" && path=="/"){
@@ -1638,19 +1766,56 @@ static void handleHttp(){
   else if(method=="GET" && path=="/api/state"){
     sendJsonState(client);
   }
+  else if(method=="GET" && path=="/api/auth"){
+    if(!authed){ sendAuthRequired(client); }
+    else {
+      String out = String("{\"ok\":true,\"user\":\"") + authCfg.user + "\"}";
+      sendText(client, out, "application/json");
+    }
+  }
   else if(method=="GET" && path=="/api/rules"){
-    sendJsonRules(client);
+    if(!authed) sendAuthRequired(client);
+    else sendJsonRules(client);
   }
   else if(method=="GET" && path=="/api/net"){
-    sendJsonNetCfg(client);
+    if(!authed) sendAuthRequired(client);
+    else sendJsonNetCfg(client);
   }
   else if(method=="GET" && path=="/api/mqtt"){
-    sendJsonMqttCfg(client);
+    if(!authed) sendAuthRequired(client);
+    else sendJsonMqttCfg(client);
   }
   else if(method=="GET" && path=="/api/backup"){
-    sendJsonBackup(client);
+    if(!authed) sendAuthRequired(client);
+    else sendJsonBackup(client);
+  }
+  else if(method=="PUT" && path=="/api/auth"){
+    if(!authed){ sendAuthRequired(client); }
+    else {
+      String body = readBody(client, contentLen);
+      DynamicJsonDocument tmp(256);
+      auto err = deserializeJson(tmp, body);
+      if(err){
+        sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
+      } else {
+        const char* user = tmp["user"] | "";
+        const char* pass = tmp["pass"] | "";
+        if(String(user).length() == 0 || String(pass).length() == 0){
+          sendText(client, String("{\"ok\":false,\"error\":\"user/pass required\"}"), "application/json", 400);
+        } else {
+          authCfg.user = String(user);
+          authCfg.pass = String(pass);
+          if(!saveAuthCfg()){
+            sendText(client, String("{\"ok\":false,\"error\":\"fs write failed\"}"), "application/json", 500);
+          } else {
+            sendText(client, String("{\"ok\":true}"), "application/json");
+          }
+        }
+      }
+    }
   }
   else if(method=="PUT" && path=="/api/net"){
+    if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
     DynamicJsonDocument tmp(256);
     auto err = deserializeJson(tmp, body);
@@ -1694,6 +1859,7 @@ static void handleHttp(){
     }
   }
   else if(method=="PUT" && path=="/api/mqtt"){
+    if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
     DynamicJsonDocument tmp(512);
     auto err = deserializeJson(tmp, body);
@@ -1720,6 +1886,7 @@ static void handleHttp(){
     }
   }
   else if(method=="PUT" && path=="/api/backup"){
+    if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
     DynamicJsonDocument tmp(12288);
     auto err = deserializeJson(tmp, body);
@@ -1760,6 +1927,7 @@ static void handleHttp(){
     }
   }
   else if(method=="PUT" && path=="/api/rules"){
+    if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
 
     DynamicJsonDocument tmp(8192);
@@ -1788,6 +1956,7 @@ static void handleHttp(){
     }
   }
   else if(method=="POST" && path=="/api/override"){
+    if(!authed){ sendAuthRequired(client); return; }
     // Strict protection: refuse override on reserved relays
     String body = readBody(client, contentLen);
     DynamicJsonDocument doc(256);
@@ -1818,6 +1987,7 @@ static void handleHttp(){
     }
   }
   else if(method=="POST" && path=="/api/shutter"){
+    if(!authed){ sendAuthRequired(client); return; }
     // Commande volet: { "id":1|2, "cmd":"UP|DOWN|STOP|AUTO" }
     String body = readBody(client, contentLen);
     DynamicJsonDocument doc(256);
@@ -1877,6 +2047,8 @@ void setup() {
     if(f){ Serial.printf("[FS] /index.html size=%u bytes\n", (unsigned)f.size()); f.close(); }
     else Serial.println("[FS] /index.html NOT found (run uploadfs)");
   }
+  if(factoryResetHeld()) doFactoryReset();
+  loadAuthCfg();
 
   // I2C
   Serial.printf("[I2C] SDA=%d SCL=%d\n", I2C_SDA, I2C_SCL);

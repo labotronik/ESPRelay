@@ -7,10 +7,12 @@
   <style>
     :root { --b:#ddd; --bg:#f7f7f7; }
     body{font-family:system-ui,Arial;margin:16px;max-width:1200px}
+    body.dark{--b:#3c3c3c;--bg:#1f1f1f;background:#121212;color:#eee}
     h1{margin:0 0 8px 0}
     .tabs{display:flex;gap:8px;margin:12px 0}
     .tab{padding:8px 10px;border:1px solid var(--b);border-radius:10px;background:#fff;cursor:pointer}
     .tab.active{background:var(--bg);font-weight:700}
+    .tab.disabled{opacity:.5;pointer-events:none}
     .tabs.sub{margin:8px 0}
     .tab.sub{padding:6px 8px;font-size:.9em}
     .row{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch}
@@ -41,6 +43,21 @@
     .flag{border:1px solid var(--b);border-radius:999px;padding:4px 8px;background:#fff;cursor:pointer;font-size:1.1em}
     .flag.active{background:var(--bg);font-weight:700}
     .chip{border:1px solid var(--b);border-radius:999px;padding:6px 10px;background:var(--bg)}
+    .notice{padding:8px 10px;border:1px dashed var(--b);border-radius:10px;background:#fff}
+    body.dark .card,
+    body.dark .module-card,
+    body.dark .tab,
+    body.dark .pill,
+    body.dark .chip,
+    body.dark pre,
+    body.dark .notice{background:#1a1a1a;color:#eee;border-color:var(--b)}
+    body.dark .tab.active{background:#262626}
+    body.dark input,
+    body.dark select,
+    body.dark button{background:#1a1a1a;color:#eee;border-color:var(--b)}
+    body.dark .muted{color:#aaa}
+    body.dark .shutter-relay{background:#1d1d1d;color:#bbb;border-color:#333}
+    body.dark .pill.shutter{background:#2a2a2a;color:#bbb;border-color:#555}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .hr{height:1px;background:var(--b);margin:8px 0}
     .shutter-relay{background:#f2f2f2;color:#777;border-color:#ddd}
@@ -57,6 +74,7 @@
     <span class="lang">
       <button class="flag" id="flag-en" onclick="setLang('en')" title="English">🇬🇧</button>
       <button class="flag" id="flag-fr" onclick="setLang('fr')" title="Français">🇫🇷</button>
+      <button class="flag" id="theme_toggle" onclick="toggleTheme()" title="Dark mode">Dark</button>
     </span>
   </div>
 
@@ -65,11 +83,32 @@
     <div class="tab" data-tab="prog" data-i18n="tabs.programming">Programming</div>
     <div class="tab" data-tab="json">JSON</div>
     <div class="tab" data-tab="net" data-i18n="tabs.network">Network</div>
+    <div class="tab" data-tab="setup" data-i18n="tabs.setup">Setup</div>
     <div class="tab" data-tab="backup" data-i18n="tabs.backup">Backup</div>
   </div>
 
   <!-- DASHBOARD -->
   <div id="tab-dash">
+    <div class="row">
+      <div class="card" style="flex:1;min-width:320px">
+        <h3 data-i18n="dashboard.login_title">Login</h3>
+        <div class="muted" data-i18n="dashboard.login_desc">Login required to modify settings.</div>
+        <div class="sep"></div>
+        <div class="inline">
+          <span id="auth_status" class="pill">Not logged</span>
+          <button class="small" id="auth_logout" onclick="logout()" data-i18n="setup.logout" style="display:none;">Logout</button>
+        </div>
+        <div class="sep"></div>
+        <form class="inline" id="auth_form" onsubmit="login(); return false;">
+          <span class="muted" data-i18n="setup.user">User</span>
+          <input id="auth_user" type="text" placeholder="">
+          <span class="muted" data-i18n="setup.pass">Pass</span>
+          <input id="auth_pass" type="password" placeholder="">
+          <button class="primary" id="auth_login_btn" onclick="login()" data-i18n="setup.login">Login</button>
+        </form>
+      </div>
+    </div>
+
     <div class="row">
       <div class="card" style="flex:1;min-width:320px">
         <h3 data-i18n="dashboard.inputs">Inputs</h3>
@@ -227,6 +266,23 @@
   </div>
 
   <!-- BACKUP -->
+  <div id="tab-setup" class="hide">
+    <div class="card" style="max-width:640px;">
+      <h3 data-i18n="setup.title">Setup</h3>
+      <div class="muted" data-i18n="setup.desc">Login required to modify settings.</div>
+      <div class="sep"></div>
+      <div class="notice" data-i18n="setup.change_note">Change credentials</div>
+      <div class="inline" style="margin-top:8px;">
+        <span class="muted" data-i18n="setup.new_user">New user</span>
+        <input id="auth_new_user" type="text">
+        <span class="muted" data-i18n="setup.new_pass">New pass</span>
+        <input id="auth_new_pass" type="password">
+        <button class="primary" onclick="saveAuth()" data-i18n="setup.save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BACKUP -->
   <div id="tab-backup" class="hide">
     <div class="card" style="max-width:640px;">
       <h3 data-i18n="backup.title">Backup / Restore</h3>
@@ -248,6 +304,10 @@
 <script>
 let i18n = {};
 let lang = localStorage.getItem("lang") || "en";
+let authUser = localStorage.getItem("auth_user") || "";
+let authPass = localStorage.getItem("auth_pass") || "";
+let isAuthed = false;
+let theme = localStorage.getItem("theme") || "light";
 
 function t(key, fallback){
   return i18n[key] || fallback || key;
@@ -278,6 +338,7 @@ async function loadLang(l){
   }
   document.documentElement.lang = l;
   applyI18n();
+  applyTheme();
   ["en","fr"].forEach(code=>{
     const btn = $("flag-"+code);
     if(btn) btn.classList.toggle("active", code === l);
@@ -295,6 +356,114 @@ function applyI18n(){
     if(key) el.setAttribute("placeholder", t(key, el.getAttribute("placeholder") || ""));
   });
 }
+
+function applyTheme(){
+  document.body.classList.toggle("dark", theme === "dark");
+  const btn = $("theme_toggle");
+  if(btn){
+    btn.textContent = theme === "dark" ? t("theme.light","Light") : t("theme.dark","Dark");
+    btn.title = t("theme.title","Dark mode");
+  }
+}
+
+function toggleTheme(){
+  theme = theme === "dark" ? "light" : "dark";
+  localStorage.setItem("theme", theme);
+  applyTheme();
+}
+
+function authHeader(){
+  if(!authUser && !authPass) return "";
+  return "Basic " + btoa(`${authUser}:${authPass}`);
+}
+
+function setAuthState(ok, userLabel=""){
+  isAuthed = !!ok;
+  const restricted = new Set(["prog","json","net","backup","setup"]);
+  document.querySelectorAll(".tab").forEach(tab=>{
+    const name = tab.dataset.tab;
+    if(restricted.has(name)) tab.classList.toggle("disabled", !isAuthed);
+  });
+  const status = $("auth_status");
+  if(status){
+    status.textContent = isAuthed ? tf("setup.logged_as",{user:userLabel || authUser},"Logged in as {user}") : t("setup.not_logged","Not logged");
+  }
+  const logoutBtn = $("auth_logout");
+  if(logoutBtn) logoutBtn.style.display = isAuthed ? "inline-block" : "none";
+  const loginBtn = $("auth_login_btn");
+  if(loginBtn) loginBtn.style.display = isAuthed ? "none" : "inline-block";
+  const form = $("auth_form");
+  if(form) form.style.display = isAuthed ? "none" : "inline-flex";
+}
+
+async function authCheck(){
+  if(!authUser && !authPass){
+    setAuthState(false);
+    return false;
+  }
+  try{
+    const res = await getAuth();
+    setAuthState(true, res.user || authUser);
+    return true;
+  }catch(e){
+    setAuthState(false);
+    return false;
+  }
+}
+
+function requireAuth(){
+  if(isAuthed) return true;
+  toast(t("toast.login_required","Login required"), false);
+  return false;
+}
+
+window.login = async ()=>{
+  authUser = $("auth_user").value.trim();
+  authPass = $("auth_pass").value;
+  localStorage.setItem("auth_user", authUser);
+  localStorage.setItem("auth_pass", authPass);
+  const ok = await authCheck();
+  if(ok){
+    toast(t("toast.login_ok","Login OK"));
+    await loadRules();
+    await loadNet();
+    await loadMqtt();
+    switchTab("dash");
+  } else {
+    toast(t("toast.login_fail","Login failed"), false);
+  }
+};
+
+window.logout = ()=>{
+  authUser = "";
+  authPass = "";
+  localStorage.removeItem("auth_user");
+  localStorage.removeItem("auth_pass");
+  setAuthState(false);
+  toast(t("toast.logout","Logged out"));
+  switchTab("dash");
+};
+
+window.saveAuth = async ()=>{
+  if(!requireAuth()) return;
+  const user = $("auth_new_user").value.trim();
+  const pass = $("auth_new_pass").value;
+  if(!user || !pass){
+    toast(t("toast.auth_required","User/pass required"), false);
+    return;
+  }
+  try{
+    await putAuth({user, pass});
+    authUser = user;
+    authPass = pass;
+    localStorage.setItem("auth_user", authUser);
+    localStorage.setItem("auth_pass", authPass);
+    setAuthState(true, user);
+    toast(t("toast.auth_saved","Credentials saved"));
+  }catch(e){
+    toast(e.message, false);
+  }
+};
 
 function getModes(){
   return [
@@ -316,7 +485,12 @@ function toast(text, ok=true){
   setTimeout(()=>{ m.textContent=""; m.className=""; }, ms);
 }
 function switchTab(name){
-  for(const t of ["dash","prog","json","net","backup"]){
+  const restricted = new Set(["prog","json","net","backup"]);
+  if(restricted.has(name) && !isAuthed){
+    toast(t("toast.login_required","Login required"), false);
+    name = "dash";
+  }
+  for(const t of ["dash","prog","json","net","setup","backup"]){
     $("tab-"+t).classList.toggle("hide", t!==name);
     document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
   }
@@ -329,7 +503,12 @@ document.querySelectorAll(".tab").forEach(el=>{
 
 // -------- API helpers --------
 async function apiJson(path, opts){
-  const r = await fetch(path, Object.assign({cache:"no-store"}, opts||{}));
+  const inOpts = opts || {};
+  const options = Object.assign({cache:"no-store"}, inOpts);
+  options.headers = Object.assign({}, inOpts.headers || {});
+  const auth = authHeader();
+  if(auth && !options.headers.Authorization) options.headers.Authorization = auth;
+  const r = await fetch(path, options);
   const ct = r.headers.get("content-type") || "";
   const raw = await r.text();
   if(!r.ok){
@@ -369,6 +548,7 @@ async function apiJson(path, opts){
   return raw;
 }
 const getState = ()=>apiJson("/api/state");
+const getAuth = ()=>apiJson("/api/auth");
 const getRules = ()=>apiJson("/api/rules");
 const putRules = (body)=>apiJson("/api/rules",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const postOverride = (relay, mode)=>apiJson("/api/override",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({relay,mode})});
@@ -379,6 +559,7 @@ const getMqtt = ()=>apiJson("/api/mqtt");
 const putMqtt = (body)=>apiJson("/api/mqtt",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const getBackup = ()=>apiJson("/api/backup");
 const putBackup = (body)=>apiJson("/api/backup",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const putAuth = (body)=>apiJson("/api/auth",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 
 // -------- data model --------
 let rules = null;
@@ -564,6 +745,7 @@ window.onFieldChanged = (ev)=>{
   renderJsonBoxes();
 };
 window.applyOne = async (i)=>{
+  if(!requireAuth()) return;
   try{
     normalizeRelayExpr(i);
     await putRules(rules);
@@ -730,6 +912,7 @@ function setUIFromShutter(idx, sh){
 }
 
 async function applyShutter(idx){
+  if(!requireAuth()) return;
   try{
     if(idx >= maxShutters()) return;
     const sh = shutterFromUI(idx);
@@ -748,6 +931,7 @@ async function applyShutter(idx){
   }
 }
 async function removeShutter(idx){
+  if(!requireAuth()) return;
   try{
     if(idx >= maxShutters()) return;
     if(!Array.isArray(rules.shutters)) rules.shutters = [];
@@ -765,8 +949,7 @@ async function removeShutter(idx){
 function renderState(s){
   lastState = s;
   if(s.eth){
-    const link = s.eth.link ? "ON" : "OFF";
-    $("net").textContent = tf("net.status",{link,ip:(s.eth.ip||"")},"ETH: {link} {ip}");
+    $("net").textContent = s.eth.ip || "";
   }
   if(typeof s.uptime_ms === "number"){
     $("uptime").textContent = `${t("uptime.label","Uptime")}: ${formatUptime(s.uptime_ms)}`;
@@ -848,10 +1031,12 @@ function formatUptime(ms){
 }
 
 async function setOverride(relay, mode){
+  if(!requireAuth()) return;
   try{ await postOverride(relay, mode); toast(tf("toast.override",{n:relay,mode},"R{n} -> {mode}")); }
   catch(e){ toast(e.message, false); }
 }
 async function setAllAuto(){
+  if(!requireAuth()) return;
   try{ for(let i=1;i<=totalRelays;i++) await postOverride(i,"AUTO"); toast(t("toast.all_auto","All AUTO")); }
   catch(e){ toast(e.message, false); }
 }
@@ -887,16 +1072,19 @@ function renderShutterDash(){
   $("shutterDash").innerHTML = parts.join("");
 }
 async function shutterStop(id){
+  if(!requireAuth()) return;
   const sh = rules?.shutters?.[id-1]; if(!sh) return;
   await postShutter("STOP", id);
   await refreshState();
 }
 async function shutterUp(id){
+  if(!requireAuth()) return;
   const sh = rules?.shutters?.[id-1]; if(!sh) return;
   await postShutter("UP", id);
   await refreshState();
 }
 async function shutterDown(id){
+  if(!requireAuth()) return;
   const sh = rules?.shutters?.[id-1]; if(!sh) return;
   await postShutter("DOWN", id);
   await refreshState();
@@ -947,6 +1135,7 @@ function readNetUI(){
 }
 
 async function loadNet(){
+  if(!isAuthed) return;
   try{
     netCfg = await getNet();
     if(!netCfg || (netCfg.mode !== "dhcp" && netCfg.mode !== "static")){
@@ -959,6 +1148,7 @@ async function loadNet(){
 }
 
 async function saveNet(){
+  if(!requireAuth()) return;
   try{
     const body = readNetUI();
     await putNet(body);
@@ -1003,6 +1193,7 @@ function readMqttUI(){
 }
 
 async function loadMqtt(){
+  if(!isAuthed) return;
   try{
     mqttCfg = await getMqtt();
     if(!mqttCfg || mqttCfg.host === undefined){
@@ -1025,6 +1216,7 @@ async function loadMqtt(){
 }
 
 async function saveMqtt(){
+  if(!requireAuth()) return;
   try{
     const body = readMqttUI();
     await putMqtt(body);
@@ -1041,6 +1233,7 @@ async function saveMqtt(){
 
 // -------- Backup / Restore --------
 async function downloadBackup(){
+  if(!requireAuth()) return;
   try{
     $("backup_status").textContent = "";
     const data = await getBackup();
@@ -1058,6 +1251,7 @@ async function downloadBackup(){
 }
 
 $("backup_file").addEventListener("change", async (ev)=>{
+  if(!requireAuth()) return;
   const f = ev.target.files && ev.target.files[0];
   if(!f) return;
   try{
@@ -1081,6 +1275,7 @@ $("backup_file").addEventListener("change", async (ev)=>{
 });
 
 async function loadRules(){
+  if(!isAuthed) return;
   try{
     if(!lastState){
       try{
@@ -1102,6 +1297,7 @@ async function loadRules(){
 }
 
 async function saveRules(){
+  if(!requireAuth()) return;
   try{
     // normaliser toutes les expressions avant envoi
     for(let i=0;i<rules.relays.length;i++) normalizeRelayExpr(i);
@@ -1126,10 +1322,13 @@ async function refreshState(){
 setInterval(refreshState, 600);
 async function init(){
   await loadLang(lang);
-  loadRules();
+  applyTheme();
+  if($("auth_user")) $("auth_user").value = "";
+  if($("auth_pass")) $("auth_pass").value = "";
+  await authCheck();
+  if(isAuthed) loadRules();
   refreshState();
-  loadNet();
-  loadMqtt();
+  if(isAuthed){ loadNet(); loadMqtt(); }
   setInterval(()=>{
     const netTab = $("tab-net");
     if(netTab && !netTab.classList.contains("hide")) loadMqtt();
