@@ -25,9 +25,14 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <DHT.h>
 
 // ===================== A ADAPTER A TON PCB =====================
 static const uint8_t PIN_LED = 40;
+static const uint8_t PIN_ONEWIRE = 1;  // DS18B20 (IO1)
+static const uint8_t PIN_DHT = 2;      // DHT22 (IO2)
 
 // I2C (PCA9538)
 static const int I2C_SDA = 8;     
@@ -38,7 +43,8 @@ static const uint8_t RELAYS_PER_MODULE = 4;
 static const uint8_t INPUTS_PER_MODULE = 4;
 static const uint8_t MAX_RELAYS = PCA_MAX_MODULES * RELAYS_PER_MODULE;
 static const uint8_t MAX_INPUTS = PCA_MAX_MODULES * INPUTS_PER_MODULE;
-static const uint8_t SHUTTER_MAX = 2;
+static const uint8_t SHUTTER_MAX = MAX_RELAYS / 2;
+static const uint8_t TEMP_MAX_SENSORS = 8;
 
 // W5500 (SPI)
 static const int PIN_W5500_CS = 10;  // <-- adapte
@@ -123,6 +129,25 @@ static bool mqttAnnounced = false;
 static bool lastInputsPub[MAX_INPUTS] = {false};
 static bool lastRelaysPub[MAX_RELAYS] = {false};
 static int lastShutterMove[SHUTTER_MAX] = {-1,-1};
+
+// ===================== 1-Wire (DS18B20) ======================
+static OneWire oneWire(PIN_ONEWIRE);
+static DallasTemperature tempSensors(&oneWire);
+static DeviceAddress tempAddr[TEMP_MAX_SENSORS];
+static float tempC[TEMP_MAX_SENSORS];
+static float lastTempPub[TEMP_MAX_SENSORS];
+static uint8_t tempCount = 0;
+static uint32_t lastTempReadMs = 0;
+
+static uint8_t shuttersLimit();
+
+static DHT dht(PIN_DHT, DHT22);
+static bool dhtPresent = false;
+static float dhtTempC = NAN;
+static float lastDhtPub = NAN;
+static float dhtHum = NAN;
+static float lastDhtHumPub = NAN;
+static bool dhtCheckDone = false;
 
 
 // ===================== Etat IO =====================
@@ -413,21 +438,23 @@ static void pcaApplyRelays() {
 // ===============================================================
 // Rules defaults + load/save
 // ===============================================================
+static void addDefaultRelay(JsonArray rel, int i){
+  JsonObject r = rel.createNestedObject();
+  JsonObject expr = r.createNestedObject("expr");
+  expr["op"] = "FOLLOW";
+  expr["in"] = (i+1 <= totalInputs) ? (i+1) : 1;
+  r["invert"] = false;
+  r["onDelay"] = 0;
+  r["offDelay"] = 0;
+  r["pulseMs"] = 200;
+}
+
 static void setDefaultRules() {
   rulesDoc.clear();
   rulesDoc["version"] = 2;
 
   JsonArray rel = rulesDoc.createNestedArray("relays");
-  for(int i=0;i<totalRelays;i++){
-    JsonObject r = rel.createNestedObject();
-    JsonObject expr = r.createNestedObject("expr");
-    expr["op"] = "FOLLOW";
-    expr["in"] = (i+1 <= totalInputs) ? (i+1) : 1;
-    r["invert"] = false;
-    r["onDelay"] = 0;
-    r["offDelay"] = 0;
-    r["pulseMs"] = 200;
-  }
+  for(int i=0;i<totalRelays;i++) addDefaultRelay(rel, i);
 
   rulesDoc.createNestedArray("shutters"); // vide par défaut
 }
@@ -458,10 +485,28 @@ static bool loadRulesFromFS() {
 
   // ensure base fields
   if(!rulesDoc["relays"].is<JsonArray>() || rulesDoc["relays"].as<JsonArray>().size() != totalRelays){
-    Serial.println("[RULES] invalid relays[] -> default");
-    setDefaultRules();
+    Serial.println("[RULES] relays[] size mismatch -> normalize");
+    DynamicJsonDocument newDoc(8192);
+    newDoc["version"] = rulesDoc["version"] | 2;
+
+    JsonArray newRel = newDoc.createNestedArray("relays");
+    for(int i=0;i<totalRelays;i++) addDefaultRelay(newRel, i);
+
+    JsonArray oldRel = rulesDoc["relays"].as<JsonArray>();
+    int copyCount = (oldRel.size() < totalRelays) ? (int)oldRel.size() : (int)totalRelays;
+    for(int i=0;i<copyCount;i++){
+      newRel[i].set(oldRel[i]);
+    }
+
+    JsonArray shNew = newDoc.createNestedArray("shutters");
+    if(rulesDoc["shutters"].is<JsonArray>()){
+      for(JsonVariant v : rulesDoc["shutters"].as<JsonArray>()) shNew.add(v);
+    }
+
+    rulesDoc.clear();
+    rulesDoc.set(newDoc);
     saveRulesToFS(rulesDoc);
-    return false;
+    return true;
   }
   if(!rulesDoc["shutters"].is<JsonArray>()){
     rulesDoc["shutters"] = JsonArray(); // will be fixed below by set?
@@ -585,6 +630,13 @@ static String mqttNodeId() {
   return id;
 }
 
+static String tempAddrToString(const DeviceAddress &a){
+  char buf[17];
+  snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X%02X%02X",
+           a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+  return String(buf);
+}
+
 static void mqttPublishDiscovery() {
   if (!mqttClient.connected()) return;
   String base = mqttBaseTopic();
@@ -635,7 +687,7 @@ static void mqttPublishDiscovery() {
     mqttPublish(topic, out, true);
   }
 
-  for (int s = 0; s < SHUTTER_MAX; s++) {
+  for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
     DynamicJsonDocument doc(512);
     String uid = id + "_shutter_" + String(s+1);
@@ -661,6 +713,72 @@ static void mqttPublishDiscovery() {
     mqttPublish(topic, out, true);
   }
 
+  // Temperature sensors
+  for (int i = 0; i < tempCount; i++) {
+    DynamicJsonDocument doc(512);
+    String uid = id + "_temp_" + String(i+1);
+    doc["name"] = "Temp " + String(i+1);
+    doc["uniq_id"] = uid;
+    doc["stat_t"] = base + "/temp/" + String(i+1) + "/state";
+    doc["unit_of_meas"] = "°C";
+    doc["dev_cla"] = "temperature";
+    doc["stat_cla"] = "measurement";
+    doc["avty_t"] = avail;
+    doc["pl_avail"] = "online";
+    doc["pl_not_avail"] = "offline";
+    JsonObject dev = doc.createNestedObject("dev");
+    dev["ids"] = id;
+    dev["name"] = node;
+    dev["mdl"] = "ESPRelay4";
+    dev["mf"] = "ESPRelay4";
+    String topic = mqttCfg.discoveryPrefix + "/sensor/" + uid + "/config";
+    String out; serializeJson(doc, out);
+    mqttPublish(topic, out, true);
+  }
+
+  if (dhtPresent) {
+    DynamicJsonDocument doc(512);
+    String uid = id + "_temp_dht22";
+    doc["name"] = "Temp DHT22";
+    doc["uniq_id"] = uid;
+    doc["stat_t"] = base + "/temp/dht/state";
+    doc["unit_of_meas"] = "°C";
+    doc["dev_cla"] = "temperature";
+    doc["stat_cla"] = "measurement";
+    doc["avty_t"] = avail;
+    doc["pl_avail"] = "online";
+    doc["pl_not_avail"] = "offline";
+    JsonObject dev = doc.createNestedObject("dev");
+    dev["ids"] = id;
+    dev["name"] = node;
+    dev["mdl"] = "ESPRelay4";
+    dev["mf"] = "ESPRelay4";
+    String topic = mqttCfg.discoveryPrefix + "/sensor/" + uid + "/config";
+    String out; serializeJson(doc, out);
+    mqttPublish(topic, out, true);
+  }
+  if (dhtPresent) {
+    DynamicJsonDocument doc(512);
+    String uid = id + "_hum_dht22";
+    doc["name"] = "Humidité DHT22";
+    doc["uniq_id"] = uid;
+    doc["stat_t"] = base + "/hum/dht/state";
+    doc["unit_of_meas"] = "%";
+    doc["dev_cla"] = "humidity";
+    doc["stat_cla"] = "measurement";
+    doc["avty_t"] = avail;
+    doc["pl_avail"] = "online";
+    doc["pl_not_avail"] = "offline";
+    JsonObject dev = doc.createNestedObject("dev");
+    dev["ids"] = id;
+    dev["name"] = node;
+    dev["mdl"] = "ESPRelay4";
+    dev["mf"] = "ESPRelay4";
+    String topic = mqttCfg.discoveryPrefix + "/sensor/" + uid + "/config";
+    String out; serializeJson(doc, out);
+    mqttPublish(topic, out, true);
+  }
+
   mqttAnnounced = true;
 }
 
@@ -676,11 +794,25 @@ static void mqttPublishAllState() {
     mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
     lastInputsPub[i] = inputs[i];
   }
-  for (int s = 0; s < SHUTTER_MAX; s++) {
+  for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
     const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
     mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
     lastShutterMove[s] = (int)shRt[s].move;
+  }
+  for (int i = 0; i < tempCount; i++) {
+    if (tempC[i] > -100.0f) {
+      mqttPublish(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
+      lastTempPub[i] = tempC[i];
+    }
+  }
+  if (dhtPresent && !isnan(dhtTempC)) {
+    mqttPublish(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
+    lastDhtPub = dhtTempC;
+  }
+  if (dhtPresent && !isnan(dhtHum)) {
+    mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
+    lastDhtHumPub = dhtHum;
   }
 }
 
@@ -706,7 +838,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   } else if (t.startsWith(base + "/shutter/") && t.endsWith("/set")) {
     int idx = t.substring((base + "/shutter/").length()).toInt();
-    if (idx >= 1 && idx <= SHUTTER_MAX) {
+    if (idx >= 1 && idx <= shuttersLimit()) {
       int s = idx - 1;
       if (p == "OPEN" || p == "UP") shRt[s].manual = MC_UP;
       else if (p == "CLOSE" || p == "DOWN") shRt[s].manual = MC_DOWN;
@@ -726,7 +858,7 @@ static void mqttSubscribeTopics() {
   for (int i = 1; i <= totalRelays; i++) {
     mqttClient.subscribe((base + "/relay/" + String(i) + "/set").c_str());
   }
-  for (int s = 1; s <= SHUTTER_MAX; s++) {
+  for (int s = 1; s <= shuttersLimit(); s++) {
     mqttClient.subscribe((base + "/shutter/" + String(s) + "/set").c_str());
   }
 }
@@ -783,7 +915,7 @@ static void mqttLoop() {
     }
   }
 
-  for (int s = 0; s < SHUTTER_MAX; s++) {
+  for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
     if ((int)shRt[s].move != lastShutterMove[s]) {
       const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
@@ -791,10 +923,32 @@ static void mqttLoop() {
       lastShutterMove[s] = (int)shRt[s].move;
     }
   }
+
+  for (int i = 0; i < tempCount; i++) {
+    if (fabs(tempC[i] - lastTempPub[i]) >= 0.1f) {
+      mqttPublish(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
+      lastTempPub[i] = tempC[i];
+    }
+  }
+
+  if (dhtPresent && !isnan(dhtTempC)) {
+    if (isnan(lastDhtPub) || fabs(dhtTempC - lastDhtPub) >= 0.1f) {
+      mqttPublish(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
+      lastDhtPub = dhtTempC;
+    }
+  }
+  if (dhtPresent && !isnan(dhtHum)) {
+    if (isnan(lastDhtHumPub) || fabs(dhtHum - lastDhtHumPub) >= 0.5f) {
+      mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
+      lastDhtHumPub = dhtHum;
+    }
+  }
 }
 
 static bool inRangeInput(int v){ return v>=1 && v<=totalInputs; }
 static bool inRangeRelay(int v){ return v>=1 && v<=totalRelays; }
+static uint8_t shuttersLimit(){ return (uint8_t)min((int)SHUTTER_MAX, (int)(totalRelays/2)); }
+static uint8_t shuttersLimit();
 
 static void clearReservations() {
   for(int i=0;i<MAX_RELAYS;i++) reservedByShutter[i] = false;
@@ -802,7 +956,7 @@ static void clearReservations() {
 
 static void applyReservationsFromConfig() {
   clearReservations();
-  for (int s = 0; s < SHUTTER_MAX; s++) {
+  for (int s = 0; s < shuttersLimit(); s++) {
     if(!shCfg[s].enabled) continue;
     if(inRangeRelay(shCfg[s].up_relay)) reservedByShutter[shCfg[s].up_relay-1] = true;
     if(inRangeRelay(shCfg[s].down_relay)) reservedByShutter[shCfg[s].down_relay-1] = true;
@@ -822,7 +976,8 @@ static bool parseShutterFromRules(JsonArray shutters, String &errMsg) {
   }
 
   int count = (int)shutters.size();
-  if(count > SHUTTER_MAX) count = SHUTTER_MAX;
+  int limit = shuttersLimit();
+  if(count > limit) count = limit;
 
   for(int s=0; s<count; s++){
     JsonObject so = shutters[s].as<JsonObject>();
@@ -867,9 +1022,9 @@ static bool parseShutterFromRules(JsonArray shutters, String &errMsg) {
   }
 
   // check relay conflicts between shutters
-  for(int a=0;a<SHUTTER_MAX;a++){
+  for(int a=0;a<limit;a++){
     if(!shCfg[a].enabled) continue;
-    for(int b=a+1;b<SHUTTER_MAX;b++){
+    for(int b=a+1;b<limit;b++){
       if(!shCfg[b].enabled) continue;
       if(shCfg[a].up_relay==shCfg[b].up_relay || shCfg[a].up_relay==shCfg[b].down_relay ||
          shCfg[a].down_relay==shCfg[b].up_relay || shCfg[a].down_relay==shCfg[b].down_relay){
@@ -1019,7 +1174,7 @@ static void shutterTickOne(int s) {
 
 static void shutterTick() {
   for(int i=0;i<MAX_RELAYS;i++) relayFromShutter[i] = false;
-  for(int s=0; s<SHUTTER_MAX; s++){
+  for(int s=0; s<shuttersLimit(); s++){
     shutterTickOne(s);
   }
 }
@@ -1132,7 +1287,7 @@ static void buildFinalRelays() {
   }
 
   // 2) apply shutter ownership: for each reserved relay, shutter output wins
-  for(int s=0; s<SHUTTER_MAX; s++){
+  for(int s=0; s<shuttersLimit(); s++){
     if(!shCfg[s].enabled) continue;
     relays[shCfg[s].up_relay-1]   = relayFromShutter[shCfg[s].up_relay-1];
     relays[shCfg[s].down_relay-1] = relayFromShutter[shCfg[s].down_relay-1];
@@ -1146,7 +1301,7 @@ static void buildFinalRelays() {
   }
 
   // 4) final safety (absolute): if shutter relays both ON => STOP both
-  for(int s=0; s<SHUTTER_MAX; s++){
+  for(int s=0; s<shuttersLimit(); s++){
     if(!shCfg[s].enabled) continue;
     bool up = relays[shCfg[s].up_relay-1];
     bool dn = relays[shCfg[s].down_relay-1];
@@ -1196,7 +1351,7 @@ static void sendText(EthernetClient& c, const String& body, const char* ctype, i
 }
 
 static void sendJsonState(EthernetClient& c){
-  DynamicJsonDocument doc(2048);
+  DynamicJsonDocument doc(4096);
   JsonArray inA = doc.createNestedArray("inputs");
   JsonArray reA = doc.createNestedArray("relays");
   JsonArray ovA = doc.createNestedArray("override");
@@ -1226,7 +1381,7 @@ static void sendJsonState(EthernetClient& c){
   }
 
   JsonArray shA = doc.createNestedArray("shutters");
-  for(int s=0; s<SHUTTER_MAX; s++){
+  for(int s=0; s<shuttersLimit(); s++){
     JsonObject o = shA.createNestedObject();
     o["enabled"] = shCfg[s].enabled ? 1 : 0;
     if(shCfg[s].enabled){
@@ -1236,6 +1391,19 @@ static void sendJsonState(EthernetClient& c){
       o["move"] = (shRt[s].move==SH_UP ? "up" : (shRt[s].move==SH_DOWN ? "down" : "stop"));
       o["cooldown_ms"] = (millis() < shRt[s].cooldownUntilMs) ? (uint32_t)(shRt[s].cooldownUntilMs - millis()) : 0;
     }
+  }
+
+  JsonArray tA = doc.createNestedArray("temps");
+  for(int i=0;i<tempCount;i++){
+    JsonObject t = tA.createNestedObject();
+    t["addr"] = tempAddrToString(tempAddr[i]);
+    t["c"] = tempC[i];
+  }
+  if(dhtPresent && (!isnan(dhtTempC) || !isnan(dhtHum))){
+    JsonObject t = tA.createNestedObject();
+    t["addr"] = "DHT22";
+    if(!isnan(dhtTempC)) t["c"] = dhtTempC;
+    if(!isnan(dhtHum)) t["h"] = dhtHum;
   }
 
   doc["modules"] = pcaCount;
@@ -1425,7 +1593,7 @@ static void rebuildRuntimeFromRules() {
   if(!parseShutterFromRules(rulesDoc["shutters"].as<JsonArray>(), err)){
     // si règles en flash sont invalides, on désactive le volet par sécurité
     Serial.printf("[SHUTTER] invalid rules: %s -> DISABLE shutter\n", err.c_str());
-    for(int s=0; s<SHUTTER_MAX; s++) shCfg[s].enabled = false;
+    for(int s=0; s<shuttersLimit(); s++) shCfg[s].enabled = false;
     applyReservationsFromConfig();
   }
   mqttAnnounced = false;
@@ -1463,6 +1631,9 @@ static void handleHttp(){
   // -------- routes --------
   if(method=="GET" && path=="/"){
     sendFile(client, "/index.html", "text/html; charset=utf-8");
+  }
+  else if(method=="GET" && (path=="/i18n_en.json" || path=="/i18n_fr.json")){
+    sendFile(client, path.c_str(), "application/json; charset=utf-8");
   }
   else if(method=="GET" && path=="/api/state"){
     sendJsonState(client);
@@ -1656,8 +1827,8 @@ static void handleHttp(){
     } else {
       const char* cmd = doc["cmd"] | "STOP";
       int sid = doc["id"] | 1;
-      if(sid < 1 || sid > SHUTTER_MAX){
-        sendText(client, String("{\"ok\":false,\"error\":\"id must be 1..2\"}"), "application/json", 400);
+      if(sid < 1 || sid > shuttersLimit()){
+        sendText(client, String("{\"ok\":false,\"error\":\"id out of range\"}"), "application/json", 400);
       } else if(!shCfg[sid-1].enabled){
         sendText(client, String("{\"ok\":false,\"error\":\"no shutter configured\"}"), "application/json", 400);
       } else if(strcmp(cmd,"UP")==0){
@@ -1712,6 +1883,21 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
 
+  // 1-Wire temp sensors
+  tempSensors.begin();
+  tempCount = tempSensors.getDeviceCount();
+  if(tempCount > TEMP_MAX_SENSORS) tempCount = TEMP_MAX_SENSORS;
+  for (uint8_t i = 0; i < tempCount; i++) {
+    if(tempSensors.getAddress(tempAddr[i], i)) {
+      tempC[i] = -127.0f;
+      lastTempPub[i] = -127.0f;
+    }
+  }
+  Serial.printf("[TEMP] sensors=%u on GPIO%d\n", tempCount, PIN_ONEWIRE);
+
+  // DHT22
+  dht.begin();
+
   // PCA9538 (scan 0x70..0x73)
   Serial.printf("[PCA9538] scan 0x%02X..0x%02X\n", PCA_BASE_ADDR, PCA_BASE_ADDR + PCA_MAX_MODULES - 1);
   pcaScanAndInit();
@@ -1754,6 +1940,31 @@ void loop() {
   // apply outputs
   pcaApplyRelays();
 
+  // Temperature polling (non-blocking-ish)
+  if(millis() - lastTempReadMs > 5000){
+    lastTempReadMs = millis();
+    if(tempCount > 0){
+      tempSensors.requestTemperatures();
+      for(uint8_t i=0;i<tempCount;i++){
+        float c = tempSensors.getTempC(tempAddr[i]);
+        tempC[i] = c;
+      }
+    }
+    float dhtC = dht.readTemperature();
+    float dhtH = dht.readHumidity();
+    if(!isnan(dhtC) || !isnan(dhtH)){
+      if(!dhtPresent) mqttAnnounced = false;
+      if(!dhtPresent) Serial.println("[DHT] detected");
+      dhtPresent = true;
+      if(!isnan(dhtC)) dhtTempC = dhtC;
+      if(!isnan(dhtH)) dhtHum = dhtH;
+      dhtCheckDone = true;
+    } else if(!dhtCheckDone) {
+      Serial.println("[DHT] not detected");
+      dhtCheckDone = true;
+    }
+  }
+
   // MQTT
   mqttLoop();
 
@@ -1768,9 +1979,8 @@ void loop() {
     for(int i=0;i<totalInputs;i++) e += String(inputs[i] ? 1 : 0);
     for(int i=0;i<totalRelays;i++) r += String(relays[i] ? 1 : 0);
     for(int i=0;i<totalRelays;i++) res += String(reservedByShutter[i] ? 1 : 0);
-    Serial.printf("[STATE] E=%s  R=%s  RES=%s  SH=%s\n",
-      e.c_str(), r.c_str(), res.c_str(),
-      shCfg[0].enabled ? (shRt[0].move==SH_UP?"UP":(shRt[0].move==SH_DOWN?"DOWN":"STOP")) : "DISABLED"
+    Serial.printf("[STATE] E=%s  R=%s  RES=%s\n",
+      e.c_str(), r.c_str(), res.c_str()
     );
   }
 
