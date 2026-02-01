@@ -16,6 +16,8 @@
 //   PUT  /api/rules        -> remplace les règles (validation volet + conflits)
 //   PUT  /api/net          -> applique + sauvegarde config réseau
 //   PUT  /api/wifi         -> active/désactive le WiFi
+//   POST /api/ota          -> update firmware (multipart/form-data)
+//   POST /api/otafs        -> update LittleFS (multipart/form-data)
 //   POST /api/override     -> override d'un relais (REFUSE si relais réservé volet)
 //   POST /api/shutter      -> commande volet (UP/DOWN/STOP) (seul moyen "API" de bouger les relais volet)
 
@@ -25,6 +27,7 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <WiFi.h>
+#include <Update.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
@@ -1817,6 +1820,145 @@ static void sendJsonRules(Client& c){
   sendText(c, out, "application/json");
 }
 
+static bool readLineBody(Client& c, int &remaining, String &out){
+  out = "";
+  while(remaining > 0){
+    while(!c.available()) delay(1);
+    char ch = c.read();
+    remaining--;
+    if(ch == '\n') break;
+    if(ch != '\r') out += ch;
+  }
+  return true;
+}
+
+static int findPattern(const uint8_t* data, int len, const char* pat, int patLen){
+  if(patLen <= 0 || len < patLen) return -1;
+  for(int i=0; i <= len - patLen; i++){
+    bool ok = true;
+    for(int j=0; j<patLen; j++){
+      if(data[i+j] != (uint8_t)pat[j]){ ok = false; break; }
+    }
+    if(ok) return i;
+  }
+  return -1;
+}
+
+static bool handleOtaMultipart(Client& c, int contentLen, const String& contentType, bool isFs, String &err){
+  int b = contentType.indexOf("boundary=");
+  if(b < 0){ err = "no boundary"; return false; }
+  String boundary = contentType.substring(b + 9);
+  boundary.trim();
+  if(boundary.startsWith("\"") && boundary.endsWith("\"")){
+    boundary = boundary.substring(1, boundary.length()-1);
+  }
+  if(boundary.length() == 0){ err = "empty boundary"; return false; }
+
+  int remaining = contentLen;
+  String line;
+  readLineBody(c, remaining, line); // --boundary
+  if(!line.startsWith("--" + boundary)){
+    err = "bad boundary";
+    return false;
+  }
+  // part headers
+  while(true){
+    if(remaining <= 0){ err = "no part header"; return false; }
+    readLineBody(c, remaining, line);
+    if(line.length() == 0) break; // end of headers
+  }
+
+  if(!Update.begin(UPDATE_SIZE_UNKNOWN, isFs ? U_SPIFFS : U_FLASH)){
+    err = "update begin failed";
+    return false;
+  }
+
+  String patStr = "\r\n--" + boundary;
+  const char* pat = patStr.c_str();
+  const int patLen = patStr.length();
+  if(patLen <= 0){ err = "bad pattern"; Update.abort(); return false; }
+
+  const int BUF_SIZE = 256;
+  uint8_t* tail = (uint8_t*)malloc(patLen);
+  uint8_t* tmp  = (uint8_t*)malloc(BUF_SIZE + patLen);
+  uint8_t* buf  = (uint8_t*)malloc(BUF_SIZE);
+  if(!tail || !tmp || !buf){
+    if(tail) free(tail);
+    if(tmp) free(tmp);
+    if(buf) free(buf);
+    err = "oom";
+    Update.abort();
+    return false;
+  }
+  int tailLen = 0;
+  bool found = false;
+
+  while(remaining > 0){
+    int toRead = remaining > BUF_SIZE ? BUF_SIZE : remaining;
+    int n = c.read(buf, toRead);
+    if(n <= 0){ delay(1); continue; }
+    remaining -= n;
+
+    // build temp buffer: [tail][new]
+    if(tailLen > 0) memcpy(tmp, tail, tailLen);
+    memcpy(tmp + tailLen, buf, n);
+    int tmpLen = tailLen + n;
+
+    int pos = findPattern(tmp, tmpLen, pat, patLen);
+    if(pos >= 0){
+      if(Update.write(tmp, pos) != (size_t)pos){
+        err = "write failed";
+        Update.abort();
+        free(tail); free(tmp);
+        return false;
+      }
+      found = true;
+      break;
+    }
+
+    if(tmpLen >= patLen){
+      int writeLen = tmpLen - (patLen - 1);
+      if(Update.write(tmp, writeLen) != (size_t)writeLen){
+        err = "write failed";
+        Update.abort();
+        free(tail); free(tmp);
+        return false;
+      }
+      memcpy(tail, tmp + writeLen, patLen - 1);
+      tailLen = patLen - 1;
+    } else {
+      memcpy(tail, tmp, tmpLen);
+      tailLen = tmpLen;
+    }
+  }
+
+  free(tail);
+  free(tmp);
+  free(buf);
+
+  if(!found){
+    err = "boundary not found";
+    Update.abort();
+    return false;
+  }
+
+  while(remaining > 0){
+    if(c.available()){
+      c.read();
+      remaining--;
+    } else {
+      delay(1);
+    }
+  }
+
+  if(!Update.end(true)){
+    err = Update.errorString();
+    return false;
+  }
+
+  return true;
+}
+
 static void ethernetPrintInfo() {
   Serial.println("\n[ETH] Ethernet status");
   Serial.print("  IP: "); Serial.println(Ethernet.localIP());
@@ -1899,6 +2041,7 @@ static void handleHttpClient(Client& client){
 
   int contentLen = 0;
   String authHeader = "";
+  String contentType = "";
   while(true){
     String h = readLine(client);
     if(h.length()==0) break;
@@ -1907,6 +2050,10 @@ static void handleHttpClient(Client& client){
     }
     if(h.startsWith("Authorization:")){
       authHeader = h.substring(14);
+    }
+    if(h.startsWith("Content-Type:")){
+      contentType = h.substring(13);
+      contentType.trim();
     }
   }
 
@@ -2070,6 +2217,38 @@ static void handleHttpClient(Client& client){
         mqttAnnounced = false;
         sendText(client, String("{\"ok\":true,\"applied\":true}"), "application/json");
       }
+    }
+  }
+  else if(method=="POST" && path=="/api/ota"){
+    if(!authed){ sendAuthRequired(client); return; }
+    if(contentLen <= 0 || contentType.indexOf("multipart/form-data") < 0){
+      sendText(client, String("{\"ok\":false,\"error\":\"multipart required\"}"), "application/json", 400);
+      client.stop();
+      return;
+    }
+    String errMsg;
+    if(!handleOtaMultipart(client, contentLen, contentType, false, errMsg)){
+      sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+    } else {
+      sendText(client, String("{\"ok\":true,\"reboot\":true}"), "application/json");
+      delay(200);
+      ESP.restart();
+    }
+  }
+  else if(method=="POST" && path=="/api/otafs"){
+    if(!authed){ sendAuthRequired(client); return; }
+    if(contentLen <= 0 || contentType.indexOf("multipart/form-data") < 0){
+      sendText(client, String("{\"ok\":false,\"error\":\"multipart required\"}"), "application/json", 400);
+      client.stop();
+      return;
+    }
+    String errMsg;
+    if(!handleOtaMultipart(client, contentLen, contentType, true, errMsg)){
+      sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+    } else {
+      sendText(client, String("{\"ok\":true,\"reboot\":true}"), "application/json");
+      delay(200);
+      ESP.restart();
     }
   }
   else if(method=="PUT" && path=="/api/backup"){
