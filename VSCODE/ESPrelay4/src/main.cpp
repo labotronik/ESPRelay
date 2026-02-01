@@ -12,16 +12,19 @@
 //   GET  /api/state        -> états inputs/relays/override + info eth + shutter
 //   GET  /api/rules        -> JSON des règles (inclut shutters[])
 //   GET  /api/net          -> config réseau (dhcp/static)
+//   GET  /api/wifi         -> config/status WiFi (AP fallback)
 //   PUT  /api/rules        -> remplace les règles (validation volet + conflits)
 //   PUT  /api/net          -> applique + sauvegarde config réseau
+//   PUT  /api/wifi         -> active/désactive le WiFi
 //   POST /api/override     -> override d'un relais (REFUSE si relais réservé volet)
 //   POST /api/shutter      -> commande volet (UP/DOWN/STOP) (seul moyen "API" de bouger les relais volet)
-//
+
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <Ethernet.h>
+#include <WiFi.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
@@ -68,6 +71,7 @@ public:
 };
 
 EthernetServerCompat server(80);
+static WiFiServer wifiServer(80);
 
 // ===================== Réseau (à adapter) ======================
 byte mac[6] = { 0,0,0,0,0,0 };
@@ -80,6 +84,12 @@ struct NetConfig {
   IPAddress dns;
 };
 
+struct WifiConfig {
+  bool enabled;   // autorise le WiFi AP fallback
+  String ssid;
+  String pass;
+};
+
 static NetConfig netCfg = {
   false,
   IPAddress(192,168,1,50),
@@ -87,6 +97,20 @@ static NetConfig netCfg = {
   IPAddress(255,255,255,0),
   IPAddress(192,168,1,1)
 };
+
+static const IPAddress WIFI_AP_IP(192,168,4,1);
+static const IPAddress WIFI_AP_GW(192,168,4,1);
+static const IPAddress WIFI_AP_SN(255,255,255,0);
+static const char* WIFI_DEFAULT_PASS = "esprelay4";
+
+static WifiConfig wifiCfg = {
+  true,
+  String(""),
+  String(WIFI_DEFAULT_PASS)
+};
+
+static bool wifiApOn = false;
+static uint32_t wifiLastCheckMs = 0;
 
 static void buildEthernetMac() {
   uint64_t mac64 = ESP.getEfuseMac();
@@ -150,6 +174,7 @@ static float dhtHum = NAN;
 static float lastDhtHumPub = NAN;
 static bool dhtCheckDone = false;
 
+
 struct AuthConfig {
   String user;
   String pass;
@@ -188,7 +213,7 @@ uint32_t pendingDeadlineMs[MAX_RELAYS] = {0};
 bool reservedByShutter[MAX_RELAYS] = {false};
 
 // ===================== Règles JSON en RAM ======================
-DynamicJsonDocument rulesDoc(8192);
+JsonDocument rulesDoc;
 
 // ===============================================================
 // I2C helpers (STOP entre write et read => évite i2cWriteReadNonStop)
@@ -228,9 +253,107 @@ static bool writeFile(const char* path, const String& data) {
   return true;
 }
 
+// ===============================================================
+// WiFi AP helpers (fallback when Ethernet link OFF)
+// ===============================================================
+static String defaultWifiSsid() {
+  uint64_t mac64 = ESP.getEfuseMac();
+  uint8_t b2 = (mac64 >> 16) & 0xFF;
+  uint8_t b1 = (mac64 >> 8) & 0xFF;
+  uint8_t b0 = (mac64 >> 0) & 0xFF;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "ESPRelay4-%02X%02X%02X", b2, b1, b0);
+  return String(buf);
+}
+
+static void wifiCfgToJson(String &out) {
+  JsonDocument doc;
+  doc["enabled"] = wifiCfg.enabled ? 1 : 0;
+  doc["ssid"] = wifiCfg.ssid;
+  doc["pass"] = wifiCfg.pass;
+  doc["ap"] = wifiApOn ? 1 : 0;
+  doc["ip"] = wifiApOn ? WiFi.softAPIP().toString() : "";
+  doc["eth_link"] = (Ethernet.linkStatus()==LinkON) ? 1 : 0;
+  serializeJsonPretty(doc, out);
+}
+
+static bool saveWifiCfg(){
+  String out;
+  wifiCfgToJson(out);
+  return writeFile("/wifi.json", out);
+}
+
+static bool loadWifiCfg(){
+  String s = readFile("/wifi.json");
+  if(s.length() == 0){
+    wifiCfg.enabled = true;
+    wifiCfg.ssid = defaultWifiSsid();
+    wifiCfg.pass = String(WIFI_DEFAULT_PASS);
+    saveWifiCfg();
+    Serial.println("[WIFI] created default /wifi.json");
+    return true;
+  }
+  JsonDocument doc;
+  auto err = deserializeJson(doc, s);
+  if(err){
+    Serial.printf("[WIFI] JSON parse error -> keep default (%s)\n", err.c_str());
+    wifiCfg.enabled = true;
+    wifiCfg.ssid = defaultWifiSsid();
+    wifiCfg.pass = String(WIFI_DEFAULT_PASS);
+    return false;
+  }
+  String defSsid = defaultWifiSsid();
+  wifiCfg.enabled = (doc["enabled"] | 1) ? true : false;
+  wifiCfg.ssid = String((const char*)(doc["ssid"] | defSsid.c_str()));
+  wifiCfg.pass = String((const char*)(doc["pass"] | WIFI_DEFAULT_PASS));
+  if(wifiCfg.ssid.length() == 0){
+    wifiCfg.ssid = defSsid;
+  }
+  if(wifiCfg.pass.length() < 8){
+    wifiCfg.pass = String(WIFI_DEFAULT_PASS);
+  }
+  return true;
+}
+
+static void startWifiAp(){
+  if(wifiApOn) return;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(WIFI_AP_IP, WIFI_AP_GW, WIFI_AP_SN);
+  const bool ok = WiFi.softAP(wifiCfg.ssid.c_str(), wifiCfg.pass.c_str());
+  if(ok){
+    wifiServer.begin();
+    wifiApOn = true;
+    Serial.printf("[WIFI] AP ON SSID=%s PASS=%s IP=%s\n", wifiCfg.ssid.c_str(), wifiCfg.pass.c_str(), WiFi.softAPIP().toString().c_str());
+  } else {
+    wifiApOn = false;
+    Serial.println("[WIFI] AP start FAILED");
+  }
+}
+
+static void stopWifiAp(){
+  if(!wifiApOn) return;
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  wifiApOn = false;
+  Serial.println("[WIFI] AP OFF");
+}
+
+static void updateWifiState(bool force=false){
+  uint32_t now = millis();
+  if(!force && (now - wifiLastCheckMs < 1000)) return;
+  wifiLastCheckMs = now;
+  const bool shouldRun = wifiCfg.enabled;
+  if(shouldRun && !wifiApOn) startWifiAp();
+  else if(!shouldRun && wifiApOn) stopWifiAp();
+}
+
+static void applyWifiCfg(){
+  updateWifiState(true);
+}
+
 // Auth config (LittleFS)
 static void authCfgToJson(String &out){
-  DynamicJsonDocument doc(192);
+  JsonDocument doc;
   doc["user"] = authCfg.user;
   doc["pass"] = authCfg.pass;
   serializeJsonPretty(doc, out);
@@ -249,7 +372,7 @@ static bool loadAuthCfg(){
     Serial.println("[AUTH] created default /auth.json");
     return true;
   }
-  DynamicJsonDocument doc(192);
+  JsonDocument doc;
   auto err = deserializeJson(doc, s);
   if(err){
     Serial.printf("[AUTH] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -284,7 +407,7 @@ static bool factoryResetHeld(){
 
 static void doFactoryReset(){
   Serial.println("[FACTORY] button held 10s -> reset config");
-  const char* files[] = {"/net.json", "/mqtt.json", "/rules.json", "/auth.json"};
+  const char* files[] = {"/net.json", "/mqtt.json", "/rules.json", "/auth.json", "/wifi.json"};
   for(size_t i=0;i<sizeof(files)/sizeof(files[0]);i++){
     if(LittleFS.exists(files[i])){
       LittleFS.remove(files[i]);
@@ -330,7 +453,7 @@ static bool parseIp(const String& s, IPAddress &out) {
 }
 
 static void netCfgToJson(String &out) {
-  DynamicJsonDocument doc(256);
+  JsonDocument doc;
   doc["mode"] = netCfg.dhcp ? "dhcp" : "static";
   if(netCfg.dhcp){
     doc["ip"] = Ethernet.localIP().toString();
@@ -363,7 +486,7 @@ static bool loadNetCfg() {
     Serial.println("[NET] created default /net.json");
     return true;
   }
-  DynamicJsonDocument doc(256);
+  JsonDocument doc;
   auto err = deserializeJson(doc, s);
   if (err) {
     Serial.printf("[NET] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -408,7 +531,7 @@ static void applyNetCfg() {
 }
 
 // Streaming file (évite page HTML tronquée)
-static void sendFile(EthernetClient& client, const char* path, const char* contentType) {
+static void sendFile(Client& client, const char* path, const char* contentType) {
   File f = LittleFS.open(path, "r");
   if (!f) {
     client.println("HTTP/1.1 404 Not Found");
@@ -514,8 +637,8 @@ static void pcaApplyRelays() {
 // Rules defaults + load/save
 // ===============================================================
 static void addDefaultRelay(JsonArray rel, int i){
-  JsonObject r = rel.createNestedObject();
-  JsonObject expr = r.createNestedObject("expr");
+  JsonObject r = rel.add<JsonObject>();
+  JsonObject expr = r["expr"].to<JsonObject>();
   expr["op"] = "FOLLOW";
   expr["in"] = (i+1 <= totalInputs) ? (i+1) : 1;
   r["invert"] = false;
@@ -528,13 +651,13 @@ static void setDefaultRules() {
   rulesDoc.clear();
   rulesDoc["version"] = 2;
 
-  JsonArray rel = rulesDoc.createNestedArray("relays");
+  JsonArray rel = rulesDoc["relays"].to<JsonArray>();
   for(int i=0;i<totalRelays;i++) addDefaultRelay(rel, i);
 
-  rulesDoc.createNestedArray("shutters"); // vide par défaut
+  rulesDoc["shutters"].to<JsonArray>(); // vide par défaut
 }
 
-static bool saveRulesToFS(const DynamicJsonDocument& doc) {
+static bool saveRulesToFS(const JsonDocument& doc) {
   String out;
   serializeJsonPretty(doc, out);
   return writeFile("/rules.json", out);
@@ -561,10 +684,10 @@ static bool loadRulesFromFS() {
   // ensure base fields
   if(!rulesDoc["relays"].is<JsonArray>() || rulesDoc["relays"].as<JsonArray>().size() != totalRelays){
     Serial.println("[RULES] relays[] size mismatch -> normalize");
-    DynamicJsonDocument newDoc(8192);
+    JsonDocument newDoc;
     newDoc["version"] = rulesDoc["version"] | 2;
 
-    JsonArray newRel = newDoc.createNestedArray("relays");
+    JsonArray newRel = newDoc["relays"].to<JsonArray>();
     for(int i=0;i<totalRelays;i++) addDefaultRelay(newRel, i);
 
     JsonArray oldRel = rulesDoc["relays"].as<JsonArray>();
@@ -573,7 +696,7 @@ static bool loadRulesFromFS() {
       newRel[i].set(oldRel[i]);
     }
 
-    JsonArray shNew = newDoc.createNestedArray("shutters");
+    JsonArray shNew = newDoc["shutters"].to<JsonArray>();
     if(rulesDoc["shutters"].is<JsonArray>()){
       for(JsonVariant v : rulesDoc["shutters"].as<JsonArray>()) shNew.add(v);
     }
@@ -584,10 +707,8 @@ static bool loadRulesFromFS() {
     return true;
   }
   if(!rulesDoc["shutters"].is<JsonArray>()){
-    rulesDoc["shutters"] = JsonArray(); // will be fixed below by set?
-    // safer:
     rulesDoc.remove("shutters");
-    rulesDoc.createNestedArray("shutters");
+    rulesDoc["shutters"].to<JsonArray>();
   }
   if(!rulesDoc["version"].is<int>()) rulesDoc["version"] = 2;
 
@@ -645,7 +766,7 @@ static String normalizeBaseTopic(const String& in) {
 }
 
 static void mqttCfgToJson(String &out) {
-  DynamicJsonDocument doc(384);
+  JsonDocument doc;
   doc["enabled"] = mqttCfg.enabled ? 1 : 0;
   doc["host"] = mqttCfg.host;
   doc["port"] = mqttCfg.port;
@@ -672,7 +793,7 @@ static bool loadMqttCfg() {
     Serial.println("[MQTT] created default /mqtt.json");
     return true;
   }
-  DynamicJsonDocument doc(384);
+  JsonDocument doc;
   auto err = deserializeJson(doc, s);
   if (err) {
     Serial.printf("[MQTT] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -720,7 +841,7 @@ static void mqttPublishDiscovery() {
   String id = node;
 
   for (int i = 0; i < totalRelays; i++) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     String uid = id + "_relay_" + String(i+1);
     doc["name"] = "Relay " + String(i+1);
     doc["uniq_id"] = uid;
@@ -731,7 +852,7 @@ static void mqttPublishDiscovery() {
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
-    JsonObject dev = doc.createNestedObject("dev");
+    JsonObject dev = doc["dev"].to<JsonObject>();
     dev["ids"] = id;
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
@@ -742,7 +863,7 @@ static void mqttPublishDiscovery() {
   }
 
   for (int i = 0; i < totalInputs; i++) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     String uid = id + "_input_" + String(i+1);
     doc["name"] = "Input " + String(i+1);
     doc["uniq_id"] = uid;
@@ -752,7 +873,7 @@ static void mqttPublishDiscovery() {
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
-    JsonObject dev = doc.createNestedObject("dev");
+    JsonObject dev = doc["dev"].to<JsonObject>();
     dev["ids"] = id;
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
@@ -764,7 +885,7 @@ static void mqttPublishDiscovery() {
 
   for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     String uid = id + "_shutter_" + String(s+1);
     doc["name"] = shCfg[s].name;
     doc["uniq_id"] = uid;
@@ -778,7 +899,7 @@ static void mqttPublishDiscovery() {
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
-    JsonObject dev = doc.createNestedObject("dev");
+    JsonObject dev = doc["dev"].to<JsonObject>();
     dev["ids"] = id;
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
@@ -790,7 +911,7 @@ static void mqttPublishDiscovery() {
 
   // Temperature sensors
   for (int i = 0; i < tempCount; i++) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     String uid = id + "_temp_" + String(i+1);
     doc["name"] = "Temp " + String(i+1);
     doc["uniq_id"] = uid;
@@ -801,7 +922,7 @@ static void mqttPublishDiscovery() {
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
-    JsonObject dev = doc.createNestedObject("dev");
+    JsonObject dev = doc["dev"].to<JsonObject>();
     dev["ids"] = id;
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
@@ -812,7 +933,7 @@ static void mqttPublishDiscovery() {
   }
 
   if (dhtPresent) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     String uid = id + "_temp_dht22";
     doc["name"] = "Temp DHT22";
     doc["uniq_id"] = uid;
@@ -823,7 +944,7 @@ static void mqttPublishDiscovery() {
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
-    JsonObject dev = doc.createNestedObject("dev");
+    JsonObject dev = doc["dev"].to<JsonObject>();
     dev["ids"] = id;
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
@@ -833,7 +954,7 @@ static void mqttPublishDiscovery() {
     mqttPublish(topic, out, true);
   }
   if (dhtPresent) {
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     String uid = id + "_hum_dht22";
     doc["name"] = "Humidité DHT22";
     doc["uniq_id"] = uid;
@@ -844,7 +965,7 @@ static void mqttPublishDiscovery() {
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
-    JsonObject dev = doc.createNestedObject("dev");
+    JsonObject dev = doc["dev"].to<JsonObject>();
     dev["ids"] = id;
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
@@ -1390,7 +1511,7 @@ static void buildFinalRelays() {
 // ===============================================================
 // HTTP helpers
 // ===============================================================
-static String readLine(EthernetClient& c){
+static String readLine(Client& c){
   String s;
   while(c.connected()){
     if(c.available()){
@@ -1402,7 +1523,7 @@ static String readLine(EthernetClient& c){
   return s;
 }
 
-static void sendText(EthernetClient& c, const String& body, const char* ctype, int code);
+static void sendText(Client& c, const String& body, const char* ctype, int code);
 
 static String base64Decode(const String& in){
   static int8_t table[256];
@@ -1445,11 +1566,11 @@ static bool checkAuthHeader(const String& authHeader){
   return (user == authCfg.user && pass == authCfg.pass);
 }
 
-static void sendAuthRequired(EthernetClient& c){
+static void sendAuthRequired(Client& c){
   sendText(c, String("{\"ok\":false,\"error\":\"auth required\"}"), "application/json", 401);
 }
 
-static String readBody(EthernetClient& c, int len){
+static String readBody(Client& c, int len){
   String b; b.reserve(len);
   while(len-- > 0){
     while(!c.available()) delay(1);
@@ -1458,7 +1579,7 @@ static String readBody(EthernetClient& c, int len){
   return b;
 }
 
-static void sendText(EthernetClient& c, const String& body, const char* ctype, int code=200){
+static void sendText(Client& c, const String& body, const char* ctype, int code=200){
   if(code==200) c.println("HTTP/1.1 200 OK");
   else if(code==401) c.println("HTTP/1.1 401 Unauthorized");
   else if(code==204) c.println("HTTP/1.1 204 No Content");
@@ -1473,12 +1594,12 @@ static void sendText(EthernetClient& c, const String& body, const char* ctype, i
   c.print(body);
 }
 
-static void sendJsonState(EthernetClient& c){
-  DynamicJsonDocument doc(4096);
-  JsonArray inA = doc.createNestedArray("inputs");
-  JsonArray reA = doc.createNestedArray("relays");
-  JsonArray ovA = doc.createNestedArray("override");
-  JsonArray rsA = doc.createNestedArray("reserved");
+static void sendJsonState(Client& c){
+  JsonDocument doc;
+  JsonArray inA = doc["inputs"].to<JsonArray>();
+  JsonArray reA = doc["relays"].to<JsonArray>();
+  JsonArray ovA = doc["override"].to<JsonArray>();
+  JsonArray rsA = doc["reserved"].to<JsonArray>();
 
   for(int i=0;i<totalInputs;i++){
     inA.add(inputs[i] ? 1 : 0);
@@ -1489,11 +1610,18 @@ static void sendJsonState(EthernetClient& c){
     rsA.add(reservedByShutter[i] ? 1 : 0);
   }
 
-  JsonObject eth = doc.createNestedObject("eth");
+  JsonObject eth = doc["eth"].to<JsonObject>();
   eth["link"] = (Ethernet.linkStatus()==LinkON) ? 1 : 0;
   eth["ip"] = Ethernet.localIP().toString();
 
-  JsonObject sh = doc.createNestedObject("shutter");
+  JsonObject wifi = doc["wifi"].to<JsonObject>();
+  wifi["enabled"] = wifiCfg.enabled ? 1 : 0;
+  wifi["ap"] = wifiApOn ? 1 : 0;
+  wifi["ssid"] = wifiCfg.ssid;
+  wifi["pass"] = wifiCfg.pass;
+  wifi["ip"] = wifiApOn ? WiFi.softAPIP().toString() : "";
+
+  JsonObject sh = doc["shutter"].to<JsonObject>();
   sh["enabled"] = shCfg[0].enabled ? 1 : 0;
   if(shCfg[0].enabled){
     sh["name"] = shCfg[0].name;
@@ -1503,9 +1631,9 @@ static void sendJsonState(EthernetClient& c){
     sh["cooldown_ms"] = (millis() < shRt[0].cooldownUntilMs) ? (uint32_t)(shRt[0].cooldownUntilMs - millis()) : 0;
   }
 
-  JsonArray shA = doc.createNestedArray("shutters");
+  JsonArray shA = doc["shutters"].to<JsonArray>();
   for(int s=0; s<shuttersLimit(); s++){
-    JsonObject o = shA.createNestedObject();
+    JsonObject o = shA.add<JsonObject>();
     o["enabled"] = shCfg[s].enabled ? 1 : 0;
     if(shCfg[s].enabled){
       o["name"] = shCfg[s].name;
@@ -1516,14 +1644,14 @@ static void sendJsonState(EthernetClient& c){
     }
   }
 
-  JsonArray tA = doc.createNestedArray("temps");
+  JsonArray tA = doc["temps"].to<JsonArray>();
   for(int i=0;i<tempCount;i++){
-    JsonObject t = tA.createNestedObject();
+    JsonObject t = tA.add<JsonObject>();
     t["addr"] = tempAddrToString(tempAddr[i]);
     t["c"] = tempC[i];
   }
   if(dhtPresent && (!isnan(dhtTempC) || !isnan(dhtHum))){
-    JsonObject t = tA.createNestedObject();
+    JsonObject t = tA.add<JsonObject>();
     t["addr"] = "DHT22";
     if(!isnan(dhtTempC)) t["c"] = dhtTempC;
     if(!isnan(dhtHum)) t["h"] = dhtHum;
@@ -1540,7 +1668,7 @@ static void sendJsonState(EthernetClient& c){
   sendText(c, out, "application/json");
 }
 
-static void sendJsonNetCfg(EthernetClient& c){
+static void sendJsonNetCfg(Client& c){
   // Reload from flash to reflect latest saved mode
   loadNetCfg();
   String out;
@@ -1548,7 +1676,13 @@ static void sendJsonNetCfg(EthernetClient& c){
   sendText(c, out, "application/json");
 }
 
-static void sendJsonMqttCfg(EthernetClient& c){
+static void sendJsonWifiCfg(Client& c){
+  String out;
+  wifiCfgToJson(out);
+  sendText(c, out, "application/json");
+}
+
+static void sendJsonMqttCfg(Client& c){
   loadMqttCfg();
   mqttSetup();
   String out;
@@ -1556,21 +1690,21 @@ static void sendJsonMqttCfg(EthernetClient& c){
   sendText(c, out, "application/json");
 }
 
-static void sendJsonBackup(EthernetClient& c){
+static void sendJsonBackup(Client& c){
   loadNetCfg();
   loadMqttCfg();
 
-  DynamicJsonDocument doc(12288);
+  JsonDocument doc;
   doc["rules"] = rulesDoc;
 
-  JsonObject net = doc.createNestedObject("net");
+  JsonObject net = doc["net"].to<JsonObject>();
   net["mode"] = netCfg.dhcp ? "dhcp" : "static";
   net["ip"] = netCfg.ip.toString();
   net["gw"] = netCfg.gw.toString();
   net["sn"] = netCfg.sn.toString();
   net["dns"] = netCfg.dns.toString();
 
-  JsonObject mq = doc.createNestedObject("mqtt");
+  JsonObject mq = doc["mqtt"].to<JsonObject>();
   mq["enabled"] = mqttCfg.enabled ? 1 : 0;
   mq["host"] = mqttCfg.host;
   mq["port"] = mqttCfg.port;
@@ -1623,6 +1757,40 @@ static bool applyNetFromJson(JsonObject o, String &err) {
   return true;
 }
 
+static bool applyWifiFromJson(JsonObject o, String &err, bool &restarting) {
+  restarting = false;
+  if(o["enabled"].isNull() && o["pass"].isNull()){
+    err = "wifi.enabled or wifi.pass required";
+    return false;
+  }
+  const String oldPass = wifiCfg.pass;
+  if(!o["enabled"].isNull()){
+    wifiCfg.enabled = (o["enabled"] | 0) ? true : false;
+  }
+  bool passChanged = false;
+  if(!o["pass"].isNull()){
+    String p = String((const char*)(o["pass"] | ""));
+    if(p.length() < 8){
+      err = "wifi.pass must be >= 8 chars";
+      return false;
+    }
+    passChanged = (p != oldPass);
+    wifiCfg.pass = p;
+  }
+  if(!saveWifiCfg()){
+    err = "wifi fs write failed";
+    return false;
+  }
+  if(passChanged && wifiCfg.enabled){
+    stopWifiAp();
+    startWifiAp();
+    restarting = true;
+  } else {
+    applyWifiCfg();
+  }
+  return true;
+}
+
 static bool applyMqttFromJson(JsonObject o, String &err) {
   mqttCfg.enabled = (o["enabled"] | 0) ? true : false;
   mqttCfg.host = String((const char*)(o["host"] | "192.168.1.43"));
@@ -1643,7 +1811,7 @@ static bool applyMqttFromJson(JsonObject o, String &err) {
   return true;
 }
 
-static void sendJsonRules(EthernetClient& c){
+static void sendJsonRules(Client& c){
   String out;
   serializeJsonPretty(rulesDoc, out);
   sendText(c, out, "application/json");
@@ -1678,21 +1846,21 @@ static void ethernetPrintInfo() {
 // ===============================================================
 // Validation PUT /api/rules + apply shutter cfg/reservations
 // ===============================================================
-static bool validateAndApplyRulesDoc(DynamicJsonDocument &candidate, String &errMsg) {
+static bool validateAndApplyRulesDoc(JsonDocument &candidate, String &errMsg) {
   // relays must be array size = totalRelays
   if(!candidate["relays"].is<JsonArray>() || candidate["relays"].as<JsonArray>().size()!=totalRelays){
     errMsg = String("relays must be array size ") + String(totalRelays);
     return false;
   }
   // shutters optional, but if present must be array
-  if(candidate.containsKey("shutters") && !candidate["shutters"].is<JsonArray>()){
+  if(!candidate["shutters"].isNull() && !candidate["shutters"].is<JsonArray>()){
     errMsg = "shutters must be array";
     return false;
   }
-  if(!candidate.containsKey("shutters")){
-    candidate.createNestedArray("shutters");
+  if(candidate["shutters"].isNull()){
+    candidate["shutters"].to<JsonArray>();
   }
-  if(!candidate.containsKey("version")) candidate["version"] = 2;
+  if(candidate["version"].isNull()) candidate["version"] = 2;
 
   // parse shutter + validate
   String shErr;
@@ -1725,10 +1893,7 @@ static void rebuildRuntimeFromRules() {
 // ===============================================================
 // HTTP router
 // ===============================================================
-static void handleHttp(){
-  EthernetClient client = server.available();
-  if(!client) return;
-
+static void handleHttpClient(Client& client){
   String req = readLine(client); // "GET /path HTTP/1.1"
   if(req.length()==0){ client.stop(); return; }
 
@@ -1781,6 +1946,10 @@ static void handleHttp(){
     if(!authed) sendAuthRequired(client);
     else sendJsonNetCfg(client);
   }
+  else if(method=="GET" && path=="/api/wifi"){
+    if(!authed) sendAuthRequired(client);
+    else sendJsonWifiCfg(client);
+  }
   else if(method=="GET" && path=="/api/mqtt"){
     if(!authed) sendAuthRequired(client);
     else sendJsonMqttCfg(client);
@@ -1793,7 +1962,7 @@ static void handleHttp(){
     if(!authed){ sendAuthRequired(client); }
     else {
       String body = readBody(client, contentLen);
-      DynamicJsonDocument tmp(256);
+      JsonDocument tmp;
       auto err = deserializeJson(tmp, body);
       if(err){
         sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1817,7 +1986,7 @@ static void handleHttp(){
   else if(method=="PUT" && path=="/api/net"){
     if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
-    DynamicJsonDocument tmp(256);
+    JsonDocument tmp;
     auto err = deserializeJson(tmp, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1858,10 +2027,28 @@ static void handleHttp(){
       }
     }
   }
+  else if(method=="PUT" && path=="/api/wifi"){
+    if(!authed){ sendAuthRequired(client); return; }
+    String body = readBody(client, contentLen);
+    JsonDocument tmp;
+    auto err = deserializeJson(tmp, body);
+    if(err){
+      sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
+    } else {
+      String errMsg;
+      bool restarting = false;
+      if(!applyWifiFromJson(tmp.as<JsonObject>(), errMsg, restarting)){
+        sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+      } else {
+        String out = String("{\"ok\":true,\"applied\":true,\"restarting\":") + (restarting ? "true" : "false") + "}";
+        sendText(client, out, "application/json");
+      }
+    }
+  }
   else if(method=="PUT" && path=="/api/mqtt"){
     if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
-    DynamicJsonDocument tmp(512);
+    JsonDocument tmp;
     auto err = deserializeJson(tmp, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1888,7 +2075,7 @@ static void handleHttp(){
   else if(method=="PUT" && path=="/api/backup"){
     if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
-    DynamicJsonDocument tmp(12288);
+    JsonDocument tmp;
     auto err = deserializeJson(tmp, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1897,10 +2084,10 @@ static void handleHttp(){
         sendText(client, String("{\"ok\":false,\"error\":\"backup must contain rules, net, mqtt\"}"), "application/json", 400);
       } else {
         String msg;
-        DynamicJsonDocument rulesTmp(8192);
+        JsonDocument rulesTmp;
         rulesTmp.set(tmp["rules"]);
         if(!validateAndApplyRulesDoc(rulesTmp, msg)){
-          DynamicJsonDocument e(256);
+          JsonDocument e;
           e["ok"]=false; e["error"]=msg;
           String out; serializeJson(e,out);
           sendText(client, out, "application/json", 400);
@@ -1930,14 +2117,14 @@ static void handleHttp(){
     if(!authed){ sendAuthRequired(client); return; }
     String body = readBody(client, contentLen);
 
-    DynamicJsonDocument tmp(8192);
+    JsonDocument tmp;
     auto err = deserializeJson(tmp, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
       String msg;
       if(!validateAndApplyRulesDoc(tmp, msg)){
-        DynamicJsonDocument e(256);
+        JsonDocument e;
         e["ok"]=false; e["error"]=msg;
         String out; serializeJson(e,out);
         sendText(client, out, "application/json", 400);
@@ -1959,7 +2146,7 @@ static void handleHttp(){
     if(!authed){ sendAuthRequired(client); return; }
     // Strict protection: refuse override on reserved relays
     String body = readBody(client, contentLen);
-    DynamicJsonDocument doc(256);
+    JsonDocument doc;
     auto err = deserializeJson(doc, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -1990,7 +2177,7 @@ static void handleHttp(){
     if(!authed){ sendAuthRequired(client); return; }
     // Commande volet: { "id":1|2, "cmd":"UP|DOWN|STOP|AUTO" }
     String body = readBody(client, contentLen);
-    DynamicJsonDocument doc(256);
+    JsonDocument doc;
     auto err = deserializeJson(doc, body);
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
@@ -2025,6 +2212,16 @@ static void handleHttp(){
 
   delay(1);
   client.stop();
+}
+
+static void handleHttp(){
+  EthernetClient ethClient = server.available();
+  if(ethClient) handleHttpClient(ethClient);
+
+  if(wifiApOn){
+    WiFiClient wifiClient = wifiServer.available();
+    if(wifiClient) handleHttpClient(wifiClient);
+  }
 }
 
 // ===============================================================
@@ -2081,9 +2278,11 @@ void setup() {
 
   // Ethernet
   loadNetCfg();
+  loadWifiCfg();
   buildEthernetMac();
   applyNetCfg();
   ethernetPrintInfo();
+  applyWifiCfg();
 
   // MQTT
   loadMqttCfg();
@@ -2095,6 +2294,7 @@ void setup() {
 
 void loop() {
   handleHttp();
+  updateWifiState();
 
   // read inputs
   pcaReadInputs();
@@ -2139,6 +2339,7 @@ void loop() {
 
   // MQTT
   mqttLoop();
+
 
   // update prev inputs for edge-based rules/toggle/pulse
   for(int k=0;k<totalInputs;k++) prevInputs[k] = inputs[k];
