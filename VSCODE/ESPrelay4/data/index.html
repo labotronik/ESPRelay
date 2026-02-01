@@ -63,6 +63,14 @@
     .shutter-relay{background:#f2f2f2;color:#777;border-color:#ddd}
     .led{display:inline-block;width:12px;height:12px;border-radius:999px;border:1px solid #bbb;background:#e6e6e6;vertical-align:middle;margin-right:6px}
     .led.on{background:#27c046;border-color:#1aa13a}
+    .switch{position:relative;display:inline-block;width:44px;height:24px;vertical-align:middle;margin:0 6px}
+    .switch input{opacity:0;width:0;height:0}
+    .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:999px;transition:.2s}
+    .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;top:3px;background:white;border-radius:50%;transition:.2s}
+    .switch input:checked + .slider{background:#27c046}
+    .switch input:checked + .slider:before{transform:translateX(20px)}
+    .relay-row{display:flex;align-items:center;gap:10px}
+    .relay-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   </style>
 </head>
 <body>
@@ -1043,20 +1051,30 @@ function renderState(s){
       const ov = (s.override && s.override[i] !== undefined) ? s.override[i] : -1;
       const modeLabel = ov===-1 ? t("relay.auto","AUTO") : (ov===1 ? t("relay.force_on","FORCE ON") : t("relay.force_off","FORCE OFF"));
       const badge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">${t("shutter.badge","SHUTTER")}</span>` : "";
-      const ledClass = v ? "led on" : "led";
-      const stateHtml = isShutterRelay ? "" : `<span class="${v?'on':''}">${v?t("state.on","ON"):t("state.off","OFF")}</span>`;
-      const modeHtml = isShutterRelay ? "" : `<span class="pill">${modeLabel}</span>`;
+      const stateChecked = v ? "checked" : "";
+      const stateHtml = "";
+      const modeHtml = isShutterRelay ? "" : `<div class="muted" style="margin-top:6px;font-size:.85em;">${modeLabel}</div>`;
+      const autoBtn = ov===-1 ? "" : `<button class="small" style="font-size:.8em" onclick="setOverride(${i+1},'AUTO')">${t("relay.auto","AUTO")}</button>`;
       const overrideHtml = isShutterRelay ? "" : `
-          <div style="margin-top:6px;">
-            <button class="small" onclick="setOverride(${i+1},'AUTO')">${t("relay.auto","AUTO")}</button>
-            <button class="small" onclick="setOverride(${i+1},'FORCE_ON')">${t("relay.on","ON")}</button>
-            <button class="small" onclick="setOverride(${i+1},'FORCE_OFF')">${t("relay.off","OFF")}</button>
+          <div class="relay-row" style="margin-top:6px;">
+            <div class="relay-left">
+              ${autoBtn}
+            </div>
           </div>
       `;
       return `
         <div class="${isShutterRelay ? "shutter-relay" : ""}" style="margin:8px 0;">
-          <span class="${ledClass}"></span><b>R${i+1}</b>${badge} :
-          ${stateHtml}
+          <div class="relay-row">
+            <div class="relay-left">
+              <b>R${i+1}</b>${badge}
+              ${isShutterRelay ? "" : `
+                <label class="switch" style="margin-left:6px;">
+                  <input type="checkbox" ${stateChecked} onchange="setOverride(${i+1}, this.checked ? 'FORCE_ON' : 'FORCE_OFF')">
+                  <span class="slider"></span>
+                </label>
+              `}
+            </div>
+          </div>
           ${modeHtml}
           ${overrideHtml}
         </div>

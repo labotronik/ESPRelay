@@ -117,6 +117,7 @@
   "relay.auto": "AUTO",
   "relay.force_on": "FORCE ON",
   "relay.force_off": "FORCE OFF",
+  "relay.force": "FORCE",
   "relay.on": "ON",
   "relay.off": "OFF",
   "toast.override": "R{n} -> {mode}",

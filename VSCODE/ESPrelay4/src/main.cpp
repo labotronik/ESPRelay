@@ -51,7 +51,7 @@ static const uint8_t SHUTTER_MAX = MAX_RELAYS / 2;
 static const uint8_t TEMP_MAX_SENSORS = 8;
 
 // W5500 (SPI)
-static const int PIN_W5500_CS = 10;  // <-- adapte
+static const int PIN_W5500_CS = 10;
 // ===============================================================
 
 // relais actifs bas ? (si tes relais s'activent quand IO=0)
