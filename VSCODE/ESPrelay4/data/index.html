@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -14,6 +14,8 @@
     .tabs.sub{margin:8px 0}
     .tab.sub{padding:6px 8px;font-size:.9em}
     .row{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch}
+    .modules{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+    .module-card{border:1px solid var(--b);border-radius:12px;padding:10px;background:#fff}
     .card{border:1px solid var(--b);border-radius:14px;padding:12px;min-width:260px;background:#fff}
     .grid4{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:12px}
     @media(min-width:1100px){ .grid4{grid-template-columns:repeat(4,minmax(260px,1fr));} }
@@ -35,6 +37,9 @@
     pre{background:#fafafa;border:1px solid var(--b);padding:10px;border-radius:12px;overflow:auto}
     .hide{display:none}
     .inline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .lang{margin-left:auto;display:flex;gap:6px}
+    .flag{border:1px solid var(--b);border-radius:999px;padding:4px 8px;background:#fff;cursor:pointer;font-size:1.1em}
+    .flag.active{background:var(--bg);font-weight:700}
     .chip{border:1px solid var(--b);border-radius:999px;padding:6px 10px;background:var(--bg)}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
     .hr{height:1px;background:var(--b);margin:8px 0}
@@ -44,44 +49,54 @@
   </style>
 </head>
 <body>
-  <h1>ESPRelay4 - Automate</h1>
+  <h1 data-i18n="page.header">ESPRelay4 - Controller</h1>
   <div class="inline">
     <span id="net" class="pill">ETH: ?</span>
     <span id="hb" class="pill"><span class="hb-dot"></span><span id="uptime">Uptime: --</span></span>
     <span id="msg"></span>
+    <span class="lang">
+      <button class="flag" id="flag-en" onclick="setLang('en')" title="English">🇬🇧</button>
+      <button class="flag" id="flag-fr" onclick="setLang('fr')" title="Français">🇫🇷</button>
+    </span>
   </div>
 
   <div class="tabs">
-    <div class="tab active" data-tab="dash">Dashboard</div>
-    <div class="tab" data-tab="prog">Programmation</div>
+    <div class="tab active" data-tab="dash" data-i18n="tabs.dashboard">Dashboard</div>
+    <div class="tab" data-tab="prog" data-i18n="tabs.programming">Programming</div>
     <div class="tab" data-tab="json">JSON</div>
-    <div class="tab" data-tab="net">Réseau</div>
-    <div class="tab" data-tab="backup">Backup</div>
+    <div class="tab" data-tab="net" data-i18n="tabs.network">Network</div>
+    <div class="tab" data-tab="backup" data-i18n="tabs.backup">Backup</div>
   </div>
 
   <!-- DASHBOARD -->
   <div id="tab-dash">
-    <div id="dashModules" class="tabs sub"></div>
     <div class="row">
       <div class="card" style="flex:1;min-width:320px">
-        <h3>Entrées</h3>
-        <div id="inputsView" class="inline">...</div>
+        <h3 data-i18n="dashboard.inputs">Inputs</h3>
+        <div id="inputsView" class="modules">...</div>
       </div>
     </div>
 
     <div class="row" style="margin-top:12px;">
       <div class="card" style="flex:1;min-width:320px">
-        <h3>Relais</h3>
-        <div id="relaysView">...</div>
+        <h3 data-i18n="dashboard.relays">Relays</h3>
+        <div id="relaysView" class="modules">...</div>
         <div class="sep"></div>
-        <button class="small" onclick="setAllAuto()">Tout en AUTO</button>
+        <button class="small" onclick="setAllAuto()" data-i18n="dashboard.all_auto">All AUTO</button>
+      </div>
+    </div>
+
+    <div class="row hide" style="margin-top:12px;" id="tempsRow">
+      <div class="card" style="flex:1;min-width:320px">
+        <h3 data-i18n="dashboard.temps">Temperatures</h3>
+        <div id="tempsView" class="inline">...</div>
       </div>
     </div>
 
     <div class="row" style="margin-top:12px;">
       <div class="card" style="flex:1;min-width:320px">
-        <h3>Volet roulant</h3>
-        <div id="shutterDash">Aucun volet configuré.</div>
+        <h3 data-i18n="dashboard.shutters">Shutters</h3>
+        <div id="shutterDash" data-i18n="shutter.none">No shutter configured.</div>
       </div>
     </div>
   </div>
@@ -89,185 +104,29 @@
   <!-- PROGRAMMATION -->
   <div id="tab-prog" class="hide">
     <div class="inline" style="margin:8px 0 12px 0;">
-      <button class="primary" onclick="loadRules()">Charger règles</button>
-      <button class="primary" onclick="saveRules()">Sauver règles</button>
-      <span class="muted">Règles sauvegardées en flash.</span>
+      <button class="primary" onclick="loadRules()" data-i18n="programming.load_rules">Load rules</button>
+      <button class="primary" onclick="saveRules()" data-i18n="programming.save_rules">Save rules</button>
+      <span class="muted" data-i18n="programming.flash_note">Rules saved in flash.</span>
     </div>
 
     <div class="card" style="margin-bottom:12px">
-      <h3>Règles simples (R1..R4)</h3>
-      <div class="muted">FOLLOW / AND / OR / XOR / TOGGLE_RISE / PULSE_RISE + invert + délais.</div>
+      <h3 data-i18n="programming.simple_rules_title">Simple rules (R1..R4)</h3>
+      <div class="muted" data-i18n="programming.simple_rules_desc">FOLLOW / AND / OR / XOR / TOGGLE_RISE / PULSE_RISE + invert + delays.</div>
     </div>
 
-    <div id="progModules" class="tabs sub"></div>
     <div id="rulesGrid" class="grid4"></div>
 
     <div class="sep"></div>
 
-    <div class="grid2">
-      <div class="card" id="sh1_card">
-        <h3>Volet 1</h3>
-        <div class="muted">
-          Ajoute un volet sur 2 relais au choix. Ne supprime pas les règles simples.
-          <br>Le firmware doit appliquer l’interlock + dead-time pour ces 2 relais.
-        </div>
-        <div class="sep"></div>
-
-        <div class="inline">
-          <span class="muted">Nom</span>
-          <input id="sh1_name" type="text" value="Volet 1" />
-        </div>
-
-        <div class="sep"></div>
-
-        <div class="two">
-          <div>
-            <div class="muted"><b>Commande UP</b></div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Entrée</span>
-              <select id="sh1_up_in"></select>
-            </div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Relais</span>
-              <select id="sh1_up_relay"></select>
-            </div>
-          </div>
-
-          <div>
-            <div class="muted"><b>Commande DOWN</b></div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Entrée</span>
-              <select id="sh1_down_in"></select>
-            </div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Relais</span>
-              <select id="sh1_down_relay"></select>
-            </div>
-          </div>
-        </div>
-
-        <div class="sep"></div>
-
-        <div class="inline">
-          <span class="muted">Mode</span>
-          <select id="sh1_mode">
-            <option value="hold">hold (maintenu)</option>
-            <option value="toggle">toggle (appui = marche/stop)</option>
-          </select>
-        </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">Priorité si 2 boutons</span>
-          <select id="sh1_priority">
-            <option value="stop">stop (recommandé)</option>
-            <option value="up">up</option>
-            <option value="down">down</option>
-          </select>
-        </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">Dead-time</span>
-          <input id="sh1_dead" type="number" min="0" max="5000" value="400" />
-          <span class="muted">ms</span>
-        </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">Temps max</span>
-          <input id="sh1_max" type="number" min="0" max="120000" value="25000" />
-          <span class="muted">ms (0 = désactivé)</span>
-        </div>
-
-        <div class="sep"></div>
-        <button class="primary" onclick="applyShutter(0)">Ajouter / Mettre à jour</button>
-        <button class="small" onclick="removeShutter(0)">Supprimer volet</button>
-
-      </div>
-
-      <div class="card" id="sh2_card">
-        <h3>Volet 2</h3>
-        <div class="muted">
-          Deuxième volet (2 relais). Les relais ne doivent pas se chevaucher.
-        </div>
-        <div class="sep"></div>
-
-        <div class="inline">
-          <span class="muted">Nom</span>
-          <input id="sh2_name" type="text" value="Volet 2" />
-        </div>
-
-        <div class="sep"></div>
-
-        <div class="two">
-          <div>
-            <div class="muted"><b>Commande UP</b></div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Entrée</span>
-              <select id="sh2_up_in"></select>
-            </div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Relais</span>
-              <select id="sh2_up_relay"></select>
-            </div>
-          </div>
-
-          <div>
-            <div class="muted"><b>Commande DOWN</b></div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Entrée</span>
-              <select id="sh2_down_in"></select>
-            </div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">Relais</span>
-              <select id="sh2_down_relay"></select>
-            </div>
-          </div>
-        </div>
-
-        <div class="sep"></div>
-
-        <div class="inline">
-          <span class="muted">Mode</span>
-          <select id="sh2_mode">
-            <option value="hold">hold (maintenu)</option>
-            <option value="toggle">toggle (appui = marche/stop)</option>
-          </select>
-        </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">Priorité si 2 boutons</span>
-          <select id="sh2_priority">
-            <option value="stop">stop (recommandé)</option>
-            <option value="up">up</option>
-            <option value="down">down</option>
-          </select>
-        </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">Dead-time</span>
-          <input id="sh2_dead" type="number" min="0" max="5000" value="400" />
-          <span class="muted">ms</span>
-        </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">Temps max</span>
-          <input id="sh2_max" type="number" min="0" max="120000" value="25000" />
-          <span class="muted">ms (0 = désactivé)</span>
-        </div>
-
-        <div class="sep"></div>
-        <button class="primary" onclick="applyShutter(1)">Ajouter / Mettre à jour</button>
-        <button class="small" onclick="removeShutter(1)">Supprimer volet</button>
-      </div>
-
-    </div>
+    <div id="shuttersGrid" class="grid2"></div>
   </div>
 
   <!-- JSON -->
   <div id="tab-json" class="hide">
     <div class="inline" style="margin:8px 0 12px 0;">
-      <button class="primary" onclick="loadRules()">Charger règles</button>
-      <button class="primary" onclick="saveRules()">Sauver règles</button>
-      <span class="muted">Vue du JSON complet</span>
+      <button class="primary" onclick="loadRules()" data-i18n="programming.load_rules">Load rules</button>
+      <button class="primary" onclick="saveRules()" data-i18n="programming.save_rules">Save rules</button>
+      <span class="muted" data-i18n="json.full_view">Full JSON view</span>
     </div>
     <pre id="jsonAll">{}</pre>
   </div>
@@ -275,51 +134,51 @@
   <!-- NETWORK -->
   <div id="tab-net" class="hide">
     <div class="card" style="max-width:640px;">
-      <h3>Configuration réseau</h3>
+      <h3 data-i18n="network.title">Network configuration</h3>
       <div class="sep"></div>
 
       <div class="inline">
-        <span class="muted">MAC</span>
+        <span class="muted" data-i18n="network.mac">MAC</span>
         <span id="net_mac" class="pill">--</span>
       </div>
 
       <div class="sep"></div>
 
       <div class="inline">
-        <span class="muted">Mode</span>
+        <span class="muted" data-i18n="network.mode">Mode</span>
         <select id="net_mode">
-          <option value="dhcp">DHCP</option>
-          <option value="static">Statique</option>
+          <option value="dhcp" data-i18n="network.mode.dhcp">DHCP</option>
+          <option value="static" data-i18n="network.mode.static">Statique</option>
         </select>
       </div>
 
       <div class="sep"></div>
 
       <div class="inline">
-        <span class="muted">IP</span>
+        <span class="muted" data-i18n="network.ip">IP</span>
         <input id="net_ip" type="text" placeholder="192.168.1.50">
       </div>
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">Passerelle</span>
+        <span class="muted" data-i18n="network.gw">Passerelle</span>
         <input id="net_gw" type="text" placeholder="192.168.1.1">
       </div>
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">Masque</span>
+        <span class="muted" data-i18n="network.mask">Masque</span>
         <input id="net_sn" type="text" placeholder="255.255.255.0">
       </div>
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">DNS</span>
+        <span class="muted" data-i18n="network.dns">DNS</span>
         <input id="net_dns" type="text" placeholder="192.168.1.1">
       </div>
 
       <div class="sep"></div>
-      <button class="primary" onclick="saveNet()">Sauver réseau</button>
+      <button class="primary" onclick="saveNet()" data-i18n="network.save">Save network</button>
       <span class="muted" id="net_hint"></span>
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3>MQTT / Home Assistant</h3>
-      <div class="muted">Configuration du broker + topics. Auto-découverte Home Assistant.</div>
+      <h3 data-i18n="mqtt.title">MQTT / Home Assistant</h3>
+      <div class="muted" data-i18n="mqtt.desc">Broker + topics configuration. Home Assistant auto-discovery.</div>
       <div class="sep"></div>
 
       <div class="inline">
@@ -327,41 +186,41 @@
       </div>
 
       <div class="inline">
-        <label><input id="mqtt_enabled" type="checkbox"> Activer MQTT</label>
+        <label><input id="mqtt_enabled" type="checkbox"> <span data-i18n="mqtt.enable">Enable MQTT</span></label>
       </div>
 
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">Broker</span>
+        <span class="muted" data-i18n="mqtt.broker">Broker</span>
         <input id="mqtt_host" type="text" placeholder="192.168.1.43">
-        <span class="muted">Port</span>
+        <span class="muted" data-i18n="mqtt.port">Port</span>
         <input id="mqtt_port" type="number" min="1" max="65535" value="1883">
       </div>
 
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">User</span>
+        <span class="muted" data-i18n="mqtt.user">User</span>
         <input id="mqtt_user" type="text" placeholder="">
-        <span class="muted">Pass</span>
+        <span class="muted" data-i18n="mqtt.pass">Pass</span>
         <input id="mqtt_pass" type="password" placeholder="">
       </div>
 
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">Client ID</span>
+        <span class="muted" data-i18n="mqtt.client_id">Client ID</span>
         <input id="mqtt_client" type="text" placeholder="ESPRelay4">
       </div>
 
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">Base topic</span>
+        <span class="muted" data-i18n="mqtt.base_topic">Base topic</span>
         <input id="mqtt_base" type="text" placeholder="esprelay4">
       </div>
 
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">Discovery prefix</span>
+        <span class="muted" data-i18n="mqtt.discovery_prefix">Discovery prefix</span>
         <input id="mqtt_disc" type="text" placeholder="homeassistant">
-        <label><input id="mqtt_retain" type="checkbox" checked> Retain</label>
+        <label><input id="mqtt_retain" type="checkbox" checked> <span data-i18n="mqtt.retain">Retain</span></label>
       </div>
 
       <div class="sep"></div>
-      <button class="primary" onclick="saveMqtt()">Sauver MQTT</button>
+      <button class="primary" onclick="saveMqtt()" data-i18n="mqtt.save">Save MQTT</button>
       <span class="muted" id="mqtt_hint"></span>
     </div>
 
@@ -370,16 +229,16 @@
   <!-- BACKUP -->
   <div id="tab-backup" class="hide">
     <div class="card" style="max-width:640px;">
-      <h3>Backup / Restore</h3>
-      <div class="muted">Exporter ou importer toute la configuration (règles + réseau + MQTT).</div>
+      <h3 data-i18n="backup.title">Backup / Restore</h3>
+      <div class="muted" data-i18n="backup.desc">Export or import the full configuration (rules + network + MQTT).</div>
       <div class="sep"></div>
       <div class="inline">
-        <button class="primary" onclick="downloadBackup()">Télécharger backup</button>
+        <button class="primary" onclick="downloadBackup()" data-i18n="backup.download">Download backup</button>
         <span id="backup_status" class="muted"></span>
-        <button class="small" onclick="document.getElementById('backup_file').click()">Importer backup</button>
+        <button class="small" onclick="document.getElementById('backup_file').click()" data-i18n="backup.import">Import backup</button>
         <input id="backup_file" type="file" accept="application/json" style="display:none">
       </div>
-      <div class="muted" style="margin-top:8px;">Importer peut changer l’IP. Recharge la page si besoin.</div>
+      <div class="muted" style="margin-top:8px;" data-i18n="backup.note">Import can change the IP. Reload the page if needed.</div>
     </div>
   </div>
 
@@ -387,14 +246,66 @@
   <div class="muted" style="text-align:center;">(c) Labotronik 2026</div>
 
 <script>
-const MODES = [
-  {id:"FOLLOW", label:"FOLLOW (1 entrée)"},
-  {id:"AND", label:"AND (plusieurs)"},
-  {id:"OR", label:"OR (plusieurs)"},
-  {id:"XOR", label:"XOR (plusieurs)"},
-  {id:"TOGGLE_RISE", label:"TOGGLE_RISE (front +)"},
-  {id:"PULSE_RISE", label:"PULSE_RISE (front +)"},
-];
+let i18n = {};
+let lang = localStorage.getItem("lang") || "en";
+
+function t(key, fallback){
+  return i18n[key] || fallback || key;
+}
+function tf(key, vars, fallback){
+  let s = t(key, fallback);
+  if(vars){
+    Object.entries(vars).forEach(([k,v])=>{
+      s = s.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+    });
+  }
+  return s;
+}
+
+function setLang(l){
+  lang = l || "en";
+  localStorage.setItem("lang", lang);
+  loadLang(lang);
+}
+
+async function loadLang(l){
+  try{
+    const res = await fetch(`/i18n_${l}.json`, {cache:"no-store"});
+    i18n = await res.json();
+  }catch(e){
+    if(l !== "en") return loadLang("en");
+    i18n = {};
+  }
+  document.documentElement.lang = l;
+  applyI18n();
+  ["en","fr"].forEach(code=>{
+    const btn = $("flag-"+code);
+    if(btn) btn.classList.toggle("active", code === l);
+  });
+}
+
+function applyI18n(){
+  document.title = t("page.title", "ESPRelay");
+  document.querySelectorAll("[data-i18n]").forEach(el=>{
+    const key = el.dataset.i18n;
+    if(key) el.textContent = t(key, el.textContent);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(el=>{
+    const key = el.dataset.i18nPlaceholder;
+    if(key) el.setAttribute("placeholder", t(key, el.getAttribute("placeholder") || ""));
+  });
+}
+
+function getModes(){
+  return [
+    {id:"FOLLOW", label:t("mode.follow","FOLLOW (1 input)")},
+    {id:"AND", label:t("mode.and","AND (multi)")},
+    {id:"OR", label:t("mode.or","OR (multi)")},
+    {id:"XOR", label:t("mode.xor","XOR (multi)")},
+    {id:"TOGGLE_RISE", label:t("mode.toggle_rise","TOGGLE_RISE (rising)")},
+    {id:"PULSE_RISE", label:t("mode.pulse_rise","PULSE_RISE (rising)")},
+  ];
+}
 
 function $(id){ return document.getElementById(id); }
 function toast(text, ok=true){
@@ -420,12 +331,42 @@ document.querySelectorAll(".tab").forEach(el=>{
 async function apiJson(path, opts){
   const r = await fetch(path, Object.assign({cache:"no-store"}, opts||{}));
   const ct = r.headers.get("content-type") || "";
+  const raw = await r.text();
   if(!r.ok){
-    const t = ct.includes("application/json") ? JSON.stringify(await r.json()) : await r.text();
-    throw new Error(`${r.status} ${r.statusText} - ${t}`);
+    let errText = raw;
+    if(ct.includes("application/json")){
+      try{ errText = JSON.stringify(JSON.parse(raw)); }catch(e){ /* keep raw */ }
+    }
+    throw new Error(`${r.status} ${r.statusText} - ${errText}`);
   }
-  if(ct.includes("application/json")) return await r.json();
-  return await r.text();
+  if(ct.includes("application/json")){
+    try{
+      return JSON.parse(raw);
+    }catch(e){
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if(start >= 0 && end > start){
+        try{ return JSON.parse(raw.slice(start, end+1)); }catch(e2){ /* ignore */ }
+      }
+      // Fallback: parse simple key/value lines (e.g. "key\tvalue")
+      const obj = {};
+      raw.split(/\r?\n/).forEach(line=>{
+        const l = line.trim();
+        if(!l) return;
+        const parts = l.split(/\s+|\t+/);
+        if(parts.length < 2) return;
+        const key = parts.shift();
+        let val = parts.join(" ").trim();
+        if(val.startsWith("\"") && val.endsWith("\"")) val = val.slice(1, -1);
+        if(/^(true|false)$/i.test(val)) obj[key] = /true/i.test(val);
+        else if(/^-?\d+(\.\d+)?$/.test(val)) obj[key] = Number(val);
+        else obj[key] = val;
+      });
+      if(Object.keys(obj).length) return obj;
+      throw new Error("invalid json");
+    }
+  }
+  return raw;
 }
 const getState = ()=>apiJson("/api/state");
 const getRules = ()=>apiJson("/api/rules");
@@ -447,9 +388,6 @@ let mqttCfg = null;
 let mqttDirty = false;
 let totalRelays = 4;
 let totalInputs = 4;
-let moduleCount = 1;
-let dashModule = 0;
-let progModule = 0;
 
 function defaultRules(){
   const rCount = totalRelays || 4;
@@ -475,30 +413,16 @@ function ensureRulesBase(r){
   return r;
 }
 
-function renderModuleTabs(containerId, activeIdx, onSelect){
-  const c = $(containerId);
-  if(!c) return;
-  c.innerHTML = "";
-  for(let m=0; m<moduleCount; m++){
-    const el = document.createElement("div");
-    el.className = "tab sub" + (m===activeIdx ? " active" : "");
-    el.textContent = `Module ${m+1}`;
-    el.addEventListener("click", ()=>onSelect(m));
-    c.appendChild(el);
-  }
-}
-
 function updateTotalsFromState(s){
   if(!s) return;
   if(typeof s.total_relays === "number") totalRelays = s.total_relays;
   if(typeof s.total_inputs === "number") totalInputs = s.total_inputs;
-  moduleCount = Math.max(1, Math.floor(totalRelays / 4));
 }
 
 function getShutterRelaySet(){
   const set = new Set();
   const shs = rules?.shutters || [];
-  shs.slice(0,2).forEach(sh=>{
+  shs.slice(0, maxShutters()).forEach(sh=>{
     if(!sh || typeof sh !== "object") return;
     const up = Number(sh.up_relay);
     const down = Number(sh.down_relay);
@@ -541,7 +465,7 @@ function ruleCard(i, r, isShutterRelay){
     (r.expr.ins || []).forEach(x=>checked.add(x));
   }
 
-  const modeOptions = MODES.map(m => `<option value="${m.id}" ${m.id===op?"selected":""}>${m.label}</option>`).join("");
+  const modeOptions = getModes().map(m => `<option value="${m.id}" ${m.id===op?"selected":""}>${m.label}</option>`).join("");
 
   const inputsHtml = Array.from({length: totalInputs || 4}).map((_,idx)=>{
     const n = idx + 1;
@@ -559,44 +483,44 @@ function ruleCard(i, r, isShutterRelay){
 
   const pulseRow = (op==="PULSE_RISE")
     ? `<div class="inline" style="margin-top:8px;">
-         <span class="muted">pulseMs</span>
+         <span class="muted">${t("rule.pulse_ms","pulseMs")}</span>
          <input type="number" min="10" max="60000" value="${pulseMs}" data-ri="${i}" data-field="pulseMs" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
          <span class="muted">ms</span>
        </div>`
     : "";
 
-  const shutterBadge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">VOLET</span>` : "";
+  const shutterBadge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">${t("shutter.badge","SHUTTER")}</span>` : "";
   return `
     <div class="card ${isShutterRelay ? "shutter-relay" : ""}">
-      <h3>Relais R${i+1} ${shutterBadge}</h3>
+      <h3>${tf("rule.relay_title",{n:i+1},"Relay R{n}")} ${shutterBadge}</h3>
 
       <div class="inline">
-        <span class="muted">Mode</span>
+        <span class="muted">${t("rule.mode","Mode")}</span>
         <select data-ri="${i}" data-field="op" onchange="onModeChanged(event)" ${isShutterRelay ? "disabled" : ""}>${modeOptions}</select>
       </div>
 
       <div class="hr"></div>
 
-      <div><b>Entrées</b></div>
+      <div><b>${t("rule.inputs","Inputs")}</b></div>
       <div class="inline" style="margin-top:6px;">${inputsHtml}</div>
-      <div class="muted" style="margin-top:6px;">FOLLOW/TOGGLE/PULSE = 1 entrée. AND/OR/XOR = plusieurs.</div>
+      <div class="muted" style="margin-top:6px;">${t("rule.inputs_hint","FOLLOW/TOGGLE/PULSE = 1 input. AND/OR/XOR = multiple.")}</div>
 
       <div class="hr"></div>
 
       <div class="inline">
-        <label><input type="checkbox" data-ri="${i}" data-field="invert" ${inv?"checked":""} onchange="onInvertChanged(event)" ${isShutterRelay ? "disabled" : ""}> Inverser</label>
+        <label><input type="checkbox" data-ri="${i}" data-field="invert" ${inv?"checked":""} onchange="onInvertChanged(event)" ${isShutterRelay ? "disabled" : ""}> ${t("rule.invert","Invert")}</label>
       </div>
 
       <div class="hr"></div>
 
       <div class="inline">
-        <span class="muted">onDelay</span>
+        <span class="muted">${t("rule.on_delay","onDelay")}</span>
         <input type="number" min="0" max="600000" value="${onDelay}" data-ri="${i}" data-field="onDelay" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
         <span class="muted">ms</span>
       </div>
 
       <div class="inline" style="margin-top:8px;">
-        <span class="muted">offDelay</span>
+        <span class="muted">${t("rule.off_delay","offDelay")}</span>
         <input type="number" min="0" max="600000" value="${offDelay}" data-ri="${i}" data-field="offDelay" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
         <span class="muted">ms</span>
       </div>
@@ -605,21 +529,14 @@ function ruleCard(i, r, isShutterRelay){
 
       <div class="hr"></div>
 
-      <button class="small" onclick="applyOne(${i})" ${isShutterRelay ? "disabled" : ""}>Appliquer R${i+1}</button>
+      <button class="small" onclick="applyOne(${i})" ${isShutterRelay ? "disabled" : ""}>${tf("rule.apply",{n:i+1},"Apply R{n}")}</button>
     </div>
   `;
 }
 
 function renderSimpleRules(){
   const shRelays = getShutterRelaySet();
-  const base = progModule * 4;
-  const items = [];
-  for(let k=0; k<4; k++){
-    const i = base + k;
-    if(i >= rules.relays.length) break;
-    items.push(ruleCard(i, rules.relays[i], shRelays.has(i+1)));
-  }
-  $("rulesGrid").innerHTML = items.join("");
+  $("rulesGrid").innerHTML = rules.relays.map((r,i)=>ruleCard(i,r, shRelays.has(i+1))).join("");
 }
 
 window.onModeChanged = (ev)=>{
@@ -650,7 +567,7 @@ window.applyOne = async (i)=>{
   try{
     normalizeRelayExpr(i);
     await putRules(rules);
-    toast(`Règles appliquées (R${i+1})`);
+    toast(tf("toast.rule_applied",{n:i+1},"Rules applied (R{n})"));
     await loadRules();
   }catch(e){
     toast(e.message, false);
@@ -669,10 +586,126 @@ function fillSelect(id, prefix, n){
   }
 }
 
+function maxShutters(){
+  return Math.max(1, Math.floor((totalRelays || 4) / 2));
+}
+
+function shId(idx, field){
+  return `sh${idx+1}_${field}`;
+}
+
+function renderShutterCards(){
+  const grid = $("shuttersGrid");
+  if(!grid) return;
+  const count = maxShutters();
+  const cards = [];
+  for(let i=0;i<count;i++){
+    cards.push(`
+      <div class="card">
+        <h3>${tf("shutter.title",{n:i+1},"Shutter {n}")}</h3>
+        <div class="muted">${tf("shutter.desc",{n:i+1},"Shutter {n} (2 relays). Relays must not overlap.")}</div>
+        <div class="sep"></div>
+
+        <div class="inline">
+          <span class="muted">${t("shutter.name","Name")}</span>
+          <input id="${shId(i,"name")}" type="text" value="${tf("shutter.default_name",{n:i+1},"Shutter {n}")}" />
+        </div>
+
+        <div class="sep"></div>
+
+        <div class="two">
+          <div>
+            <div class="muted"><b>${t("shutter.cmd_up","UP command")}</b></div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">${t("shutter.input","Input")}</span>
+              <select id="${shId(i,"up_in")}"></select>
+            </div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">${t("shutter.relay","Relay")}</span>
+              <select id="${shId(i,"up_relay")}"></select>
+            </div>
+          </div>
+
+          <div>
+            <div class="muted"><b>${t("shutter.cmd_down","DOWN command")}</b></div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">${t("shutter.input","Input")}</span>
+              <select id="${shId(i,"down_in")}"></select>
+            </div>
+            <div class="inline" style="margin-top:6px;">
+              <span class="muted">${t("shutter.relay","Relay")}</span>
+              <select id="${shId(i,"down_relay")}"></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="sep"></div>
+
+        <div class="inline">
+          <span class="muted">${t("shutter.mode","Mode")}</span>
+          <select id="${shId(i,"mode")}">
+            <option value="hold">${t("shutter.mode_hold","hold (momentary)")}</option>
+            <option value="toggle">${t("shutter.mode_toggle","toggle (press = run/stop)")}</option>
+          </select>
+        </div>
+
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">${t("shutter.priority","Priority when 2 buttons")}</span>
+          <select id="${shId(i,"priority")}">
+            <option value="stop">${t("shutter.priority_stop","stop (recommended)")}</option>
+            <option value="up">${t("shutter.priority_up","up")}</option>
+            <option value="down">${t("shutter.priority_down","down")}</option>
+          </select>
+        </div>
+
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">${t("shutter.dead_time","Dead-time")}</span>
+          <input id="${shId(i,"dead")}" type="number" min="0" max="5000" value="400" />
+          <span class="muted">ms</span>
+        </div>
+
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">${t("shutter.max_time","Max time")}</span>
+          <input id="${shId(i,"max")}" type="number" min="0" max="120000" value="25000" />
+          <span class="muted">${t("shutter.max_time_off","ms (0 = disabled)")}</span>
+        </div>
+
+        <div class="sep"></div>
+        <button class="primary" onclick="applyShutter(${i})">${t("shutter.add_update","Add / Update")}</button>
+        <button class="small" onclick="removeShutter(${i})">${t("shutter.remove","Remove shutter")}</button>
+      </div>
+    `);
+  }
+  grid.innerHTML = cards.join("");
+
+  for(let i=0;i<count;i++){
+    fillSelect(shId(i,"up_in"), "E", totalInputs || 4);
+    fillSelect(shId(i,"down_in"), "E", totalInputs || 4);
+    fillSelect(shId(i,"up_relay"), "R", totalRelays || 4);
+    fillSelect(shId(i,"down_relay"), "R", totalRelays || 4);
+  }
+
+  for(let i=0;i<count;i++){
+    const def = {
+      name: tf("shutter.default_name",{n:i+1},"Shutter {n}"),
+      up_in: 1,
+      down_in: 2,
+      up_relay: (i*2)+1,
+      down_relay: (i*2)+2,
+      mode: "hold",
+      priority: "stop",
+      deadtime_ms: 400,
+      max_run_ms: 25000
+    };
+    const sh = rules?.shutters?.[i] || def;
+    setUIFromShutter(i, sh);
+  }
+}
+
 function shutterFromUI(idx){
-  const p = idx === 0 ? "sh1_" : "sh2_";
+  const p = `sh${idx+1}_`;
   return {
-    name: $(p+"name").value || (idx===0 ? "Volet 1" : "Volet 2"),
+    name: $(p+"name").value || tf("shutter.default_name",{n:idx+1},"Shutter {n}"),
     up_in: Number($(p+"up_in").value),
     down_in: Number($(p+"down_in").value),
     up_relay: Number($(p+"up_relay").value),
@@ -684,33 +717,31 @@ function shutterFromUI(idx){
   };
 }
 function setUIFromShutter(idx, sh){
-  const p = idx === 0 ? "sh1_" : "sh2_";
-  $(p+"name").value = sh.name || (idx===0 ? "Volet 1" : "Volet 2");
+  const p = `sh${idx+1}_`;
+  $(p+"name").value = sh.name || tf("shutter.default_name",{n:idx+1},"Shutter {n}");
   $(p+"up_in").value = String(sh.up_in || 1);
   $(p+"down_in").value = String(sh.down_in || 2);
-  $(p+"up_relay").value = String(sh.up_relay || (idx===0 ? 1 : 3));
-  $(p+"down_relay").value = String(sh.down_relay || (idx===0 ? 2 : 4));
+  $(p+"up_relay").value = String(sh.up_relay || (idx*2 + 1));
+  $(p+"down_relay").value = String(sh.down_relay || (idx*2 + 2));
   $(p+"mode").value = sh.mode || "hold";
   $(p+"priority").value = sh.priority || "stop";
   $(p+"dead").value = String(sh.deadtime_ms ?? 400);
   $(p+"max").value = String(sh.max_run_ms ?? 25000);
 }
-["sh1_name","sh1_up_in","sh1_down_in","sh1_up_relay","sh1_down_relay","sh1_mode","sh1_priority","sh1_dead","sh1_max",
- "sh2_name","sh2_up_in","sh2_down_in","sh2_up_relay","sh2_down_relay","sh2_mode","sh2_priority","sh2_dead","sh2_max"]
-  .forEach(id => $(id).addEventListener("change", ()=>{}));
 
 async function applyShutter(idx){
   try{
+    if(idx >= maxShutters()) return;
     const sh = shutterFromUI(idx);
     if(sh.up_relay === sh.down_relay){
-      toast("UP relay et DOWN relay doivent être différents", false);
+      toast(t("toast.shutter_same_relay","UP relay and DOWN relay must be different"), false);
       return;
     }
     if(!Array.isArray(rules.shutters)) rules.shutters = [];
     if(rules.shutters.length <= idx) rules.shutters.length = idx + 1;
     rules.shutters[idx] = sh;
     await putRules(rules);
-    toast("Volet ajouté / mis à jour");
+    toast(t("toast.shutter_saved","Shutter added / updated"));
     await loadRules();
   }catch(e){
     toast(e.message, false);
@@ -718,11 +749,12 @@ async function applyShutter(idx){
 }
 async function removeShutter(idx){
   try{
+    if(idx >= maxShutters()) return;
     if(!Array.isArray(rules.shutters)) rules.shutters = [];
     rules.shutters[idx] = null;
     while(rules.shutters.length && (rules.shutters[rules.shutters.length-1] == null)) rules.shutters.pop();
     await putRules(rules);
-    toast("Volet supprimé");
+    toast(t("toast.shutter_removed","Shutter removed"));
     await loadRules();
   }catch(e){
     toast(e.message, false);
@@ -734,52 +766,75 @@ function renderState(s){
   lastState = s;
   if(s.eth){
     const link = s.eth.link ? "ON" : "OFF";
-    $("net").textContent = `ETH: ${link} ${s.eth.ip||""}`;
+    $("net").textContent = tf("net.status",{link,ip:(s.eth.ip||"")},"ETH: {link} {ip}");
   }
   if(typeof s.uptime_ms === "number"){
-    $("uptime").textContent = `Uptime: ${formatUptime(s.uptime_ms)}`;
+    $("uptime").textContent = `${t("uptime.label","Uptime")}: ${formatUptime(s.uptime_ms)}`;
   }
   updateTotalsFromState(s);
-  if(dashModule >= moduleCount) dashModule = 0;
-  renderModuleTabs("dashModules", dashModule, (m)=>{ dashModule = m; renderState(lastState); });
 
-  const inBase = dashModule * 4;
-  const inputsSlice = s.inputs.slice(inBase, inBase + 4);
-  $("inputsView").innerHTML = inputsSlice.map((v,i)=>
-    `<span class="chip">E${inBase+i+1}: <span class="${v?'on':''}">${v?'ON':'OFF'}</span></span>`
-  ).join("");
+  const inCols = [];
+  const inModules = Math.max(1, Math.ceil((s.inputs?.length || 0) / 4));
+  for(let m=0; m<inModules; m++){
+    const base = m*4;
+    const slice = s.inputs.slice(base, base+4);
+    const chips = slice.map((v,i)=>
+      `<span class="chip">E${base+i+1}: <span class="${v?'on':''}">${v?t("state.on","ON"):t("state.off","OFF")}</span></span>`
+    ).join("");
+    inCols.push(`<div class="module-card"><b>${tf("module.title",{n:m+1},"Module {n}")}</b><div class="sep"></div><div class="inline">${chips}</div></div>`);
+  }
+  $("inputsView").innerHTML = inCols.join("");
 
-  const reBase = dashModule * 4;
-  const relaysSlice = s.relays.slice(reBase, reBase + 4);
-  $("relaysView").innerHTML = relaysSlice.map((v,off)=>{
-    const i = reBase + off;
-    const shRelays = getShutterRelaySet();
-    const isShutterRelay = shRelays.has(i+1);
-    const ov = (s.override && s.override[i] !== undefined) ? s.override[i] : -1;
-    const modeLabel = ov===-1 ? "AUTO" : (ov===1 ? "FORCE ON" : "FORCE OFF");
-    const badge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">VOLET</span>` : "";
-    const ledClass = v ? "led on" : "led";
-    const stateHtml = isShutterRelay ? "" : `<span class="${v?'on':''}">${v?'ON':'OFF'}</span>`;
-    const modeHtml = isShutterRelay ? "" : `<span class="pill">${modeLabel}</span>`;
-    const overrideHtml = isShutterRelay ? "" : `
-        <div style="margin-top:6px;">
-          <button class="small" onclick="setOverride(${i+1},'AUTO')">AUTO</button>
-          <button class="small" onclick="setOverride(${i+1},'FORCE_ON')">ON</button>
-          <button class="small" onclick="setOverride(${i+1},'FORCE_OFF')">OFF</button>
+  const shRelays = getShutterRelaySet();
+  const reCols = [];
+  const reModules = Math.max(1, Math.ceil((s.relays?.length || 0) / 4));
+  for(let m=0; m<reModules; m++){
+    const base = m*4;
+    const slice = s.relays.slice(base, base+4);
+    const items = slice.map((v,off)=>{
+      const i = base + off;
+      const isShutterRelay = shRelays.has(i+1);
+      const ov = (s.override && s.override[i] !== undefined) ? s.override[i] : -1;
+      const modeLabel = ov===-1 ? t("relay.auto","AUTO") : (ov===1 ? t("relay.force_on","FORCE ON") : t("relay.force_off","FORCE OFF"));
+      const badge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">${t("shutter.badge","SHUTTER")}</span>` : "";
+      const ledClass = v ? "led on" : "led";
+      const stateHtml = isShutterRelay ? "" : `<span class="${v?'on':''}">${v?t("state.on","ON"):t("state.off","OFF")}</span>`;
+      const modeHtml = isShutterRelay ? "" : `<span class="pill">${modeLabel}</span>`;
+      const overrideHtml = isShutterRelay ? "" : `
+          <div style="margin-top:6px;">
+            <button class="small" onclick="setOverride(${i+1},'AUTO')">${t("relay.auto","AUTO")}</button>
+            <button class="small" onclick="setOverride(${i+1},'FORCE_ON')">${t("relay.on","ON")}</button>
+            <button class="small" onclick="setOverride(${i+1},'FORCE_OFF')">${t("relay.off","OFF")}</button>
+          </div>
+      `;
+      return `
+        <div class="${isShutterRelay ? "shutter-relay" : ""}" style="margin:8px 0;">
+          <span class="${ledClass}"></span><b>R${i+1}</b>${badge} :
+          ${stateHtml}
+          ${modeHtml}
+          ${overrideHtml}
         </div>
-    `;
-    return `
-      <div class="${isShutterRelay ? "shutter-relay" : ""}" style="margin:8px 0;">
-        <span class="${ledClass}"></span><b>R${i+1}</b>${badge} :
-        ${stateHtml}
-        ${modeHtml}
-        ${overrideHtml}
-      </div>
-      <div class="hr"></div>
-    `;
-  }).join("");
+        <div class="hr"></div>
+      `;
+    }).join("");
+    reCols.push(`<div class="module-card"><b>${tf("module.title",{n:m+1},"Module {n}")}</b><div class="sep"></div>${items}</div>`);
+  }
+  $("relaysView").innerHTML = reCols.join("");
 
   renderShutterDash();
+
+  const tempsRow = $("tempsRow");
+  const tempsView = $("tempsView");
+  if(s.temps && s.temps.length){
+    tempsRow.classList.remove("hide");
+    tempsView.innerHTML = s.temps.map(t=>{
+      const v = (typeof t.c === "number") ? `${t.c.toFixed(2)} °C` : "--";
+      const h = (typeof t.h === "number") ? ` • ${t.h.toFixed(1)} %` : "";
+      return `<span class="chip">${t.addr}: <span class="on">${v}${h}</span></span>`;
+    }).join("");
+  } else {
+    tempsRow.classList.add("hide");
+  }
 }
 
 function formatUptime(ms){
@@ -788,45 +843,45 @@ function formatUptime(ms){
   const h = Math.floor((total%86400)/3600);
   const m = Math.floor((total%3600)/60);
   const s = total%60;
-  if(d>0) return `${d}j ${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  if(d>0) return `${d}${t("uptime.days_short","d")} ${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
   return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 }
 
 async function setOverride(relay, mode){
-  try{ await postOverride(relay, mode); toast(`R${relay} -> ${mode}`); }
+  try{ await postOverride(relay, mode); toast(tf("toast.override",{n:relay,mode},"R{n} -> {mode}")); }
   catch(e){ toast(e.message, false); }
 }
 async function setAllAuto(){
-  try{ for(let i=1;i<=totalRelays;i++) await postOverride(i,"AUTO"); toast("Tout en AUTO"); }
+  try{ for(let i=1;i<=totalRelays;i++) await postOverride(i,"AUTO"); toast(t("toast.all_auto","All AUTO")); }
   catch(e){ toast(e.message, false); }
 }
 
 function renderShutterDash(){
   const shs = rules?.shutters || [];
-  const hasAny = shs.slice(0,2).some(sh=>sh && typeof sh === "object");
+  const hasAny = shs.slice(0, maxShutters()).some(sh=>sh && typeof sh === "object");
   if(!hasAny){
-    $("shutterDash").textContent = "Aucun volet configuré.";
+    $("shutterDash").textContent = t("shutter.none","No shutter configured.");
     return;
   }
   const parts = [];
-  for(let idx=0; idx<2; idx++){
+  for(let idx=0; idx<maxShutters(); idx++){
     const sh = shs[idx];
     if(!sh || typeof sh !== "object") continue;
     parts.push(`
       <div class="inline">
-        <span class="pill">${sh.name || ("Volet " + (idx+1))}</span>
-        <span class="muted">UP=R${sh.up_relay} / DOWN=R${sh.down_relay}</span>
+        <span class="pill">${sh.name || tf("shutter.default_name",{n:idx+1},"Shutter {n}")}</span>
+        <span class="muted">${tf("shutter.relay_map",{up:sh.up_relay,down:sh.down_relay},"UP=R{up} / DOWN=R{down}")}</span>
       </div>
       <div class="sep"></div>
       <div class="inline">
-        <button class="primary" onclick="shutterUp(${idx+1})">UP</button>
-        <button class="primary" onclick="shutterStop(${idx+1})">STOP</button>
-        <button class="primary" onclick="shutterDown(${idx+1})">DOWN</button>
+        <button class="primary" onclick="shutterUp(${idx+1})">${t("shutter.up","UP")}</button>
+        <button class="primary" onclick="shutterStop(${idx+1})">${t("shutter.stop","STOP")}</button>
+        <button class="primary" onclick="shutterDown(${idx+1})">${t("shutter.down","DOWN")}</button>
       </div>
       <div class="muted" style="margin-top:8px">
-        Commande via API volet.
+        ${t("shutter.command_hint","Command via shutter API.")}
       </div>
-      ${idx === 1 ? "" : "<div class=\"sep\"></div>"}
+      ${idx === maxShutters()-1 ? "" : "<div class=\"sep\"></div>"}
     `);
   }
   $("shutterDash").innerHTML = parts.join("");
@@ -856,10 +911,9 @@ function renderJsonBoxes(){
 
 // -------- Load / Save --------
 function renderAll(){
-  if(progModule >= moduleCount) progModule = 0;
-  renderModuleTabs("progModules", progModule, (m)=>{ progModule = m; renderSimpleRules(); renderJsonBoxes(); });
   renderSimpleRules();
   renderJsonBoxes();
+  renderShutterCards();
   renderShutterDash();
 }
 
@@ -879,7 +933,7 @@ function updateNetUiState(){
   ["net_ip","net_gw","net_sn","net_dns"].forEach(id=>{
     $(id).disabled = dhcp;
   });
-  $("net_hint").textContent = dhcp ? "DHCP activé" : "";
+  $("net_hint").textContent = dhcp ? t("network.dhcp_enabled","DHCP enabled") : "";
 }
 
 function readNetUI(){
@@ -900,7 +954,7 @@ async function loadNet(){
     }
     setNetUI(netCfg);
   }catch(e){
-    toast("GET /api/net indisponible", false);
+    toast(t("toast.net_unavailable","GET /api/net unavailable"), false);
   }
 }
 
@@ -908,7 +962,7 @@ async function saveNet(){
   try{
     const body = readNetUI();
     await putNet(body);
-    toast("Réseau sauvegardé");
+    toast(t("toast.net_saved","Network saved"));
     await loadNet();
   }catch(e){
     toast(e.message, false);
@@ -928,9 +982,9 @@ function setMqttUI(cfg){
   $("mqtt_base").value = cfg.base || "esprelay4";
   $("mqtt_disc").value = cfg.discovery_prefix || "homeassistant";
   $("mqtt_retain").checked = cfg.retain !== 0;
-  const status = cfg.connected ? "Connecté" : "Déconnecté";
-  $("mqtt_status").textContent = `MQTT: ${status}`;
-  $("mqtt_hint").textContent = cfg.enabled ? "" : "MQTT désactivé";
+  const status = cfg.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
+  $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status}`;
+  $("mqtt_hint").textContent = cfg.enabled ? "" : t("mqtt.disabled","MQTT disabled");
   mqttDirty = false;
 }
 
@@ -959,11 +1013,14 @@ async function loadMqtt(){
     }
     if(!mqttDirty) setMqttUI(mqttCfg);
     else {
-      const status = mqttCfg.connected ? "Connecté" : "Déconnecté";
-      $("mqtt_status").textContent = `MQTT: ${status}`;
+      const status = mqttCfg.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
+      $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status}`;
     }
   }catch(e){
-    toast("GET /api/mqtt indisponible", false);
+    console.warn("MQTT fetch failed", e);
+    const status = mqttCfg?.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
+    if($("mqtt_status")) $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status}`;
+    if($("mqtt_hint")) $("mqtt_hint").textContent = t("toast.mqtt_unavailable","GET /api/mqtt unavailable");
   }
 }
 
@@ -971,7 +1028,7 @@ async function saveMqtt(){
   try{
     const body = readMqttUI();
     await putMqtt(body);
-    toast("MQTT sauvegardé");
+    toast(t("toast.mqtt_saved","MQTT saved"));
     mqttDirty = false;
     await loadMqtt();
   }catch(e){
@@ -1008,16 +1065,16 @@ $("backup_file").addEventListener("change", async (ev)=>{
     const json = JSON.parse(text);
     const res = await putBackup(json);
     if(res && res.reboot){
-      $("backup_status").textContent = "Import OK, redémarrage…";
+      $("backup_status").textContent = t("backup.status.ok_reboot","Import OK, rebooting…");
     } else {
-      $("backup_status").textContent = "Import OK";
+      $("backup_status").textContent = t("backup.status.ok","Import OK");
     }
     await loadRules();
     await loadNet();
     await loadMqtt();
   }catch(e){
     toast(e.message, false);
-    $("backup_status").textContent = "Import échoué";
+    $("backup_status").textContent = t("backup.status.fail","Import failed");
   } finally {
     ev.target.value = "";
   }
@@ -1032,29 +1089,13 @@ async function loadRules(){
       }catch(e){ /* ignore */ }
     }
     rules = ensureRulesBase(await getRules());
-    toast("Règles chargées");
+    toast(t("toast.rules_loaded","Rules loaded"));
   }catch(e){
     rules = ensureRulesBase(defaultRules());
-    toast("GET /api/rules indisponible (fallback)", false);
+    toast(t("toast.rules_unavailable","GET /api/rules unavailable (fallback)"), false);
   }
 
-  // selects volet
-  ["sh1_up_in","sh1_down_in","sh2_up_in","sh2_down_in"].forEach(id=>fillSelect(id,"E",totalInputs || 4));
-  ["sh1_up_relay","sh1_down_relay","sh2_up_relay","sh2_down_relay"].forEach(id=>fillSelect(id,"R",totalRelays || 4));
-
-  const sh1 = rules.shutters?.[0] || {
-    name:"Volet 1", up_in:1, down_in:2, up_relay:1, down_relay:2,
-    mode:"hold", priority:"stop", deadtime_ms:400, max_run_ms:25000
-  };
-  const sh2 = rules.shutters?.[1] || {
-    name:"Volet 2", up_in:1, down_in:2, up_relay:3, down_relay:4,
-    mode:"hold", priority:"stop", deadtime_ms:400, max_run_ms:25000
-  };
-  setUIFromShutter(0, sh1);
-  setUIFromShutter(1, sh2);
-  const sh1Configured = !!rules.shutters?.[0];
-  const sh2Card = $("sh2_card");
-  if(sh2Card) sh2Card.classList.toggle("shutter-relay", !sh1Configured);
+  renderShutterCards();
 
   renderAll();
   if(lastState) renderState(lastState);
@@ -1065,7 +1106,7 @@ async function saveRules(){
     // normaliser toutes les expressions avant envoi
     for(let i=0;i<rules.relays.length;i++) normalizeRelayExpr(i);
     await putRules(rules);
-    toast("Règles sauvegardées");
+    toast(t("toast.rules_saved","Rules saved"));
     await loadRules();
   }catch(e){
     toast(e.message, false);
@@ -1083,14 +1124,18 @@ async function refreshState(){
 }
 
 setInterval(refreshState, 600);
-loadRules();
-refreshState();
-loadNet();
-loadMqtt();
-setInterval(()=>{
-  const netTab = $("tab-net");
-  if(netTab && !netTab.classList.contains("hide")) loadMqtt();
-}, 5000);
+async function init(){
+  await loadLang(lang);
+  loadRules();
+  refreshState();
+  loadNet();
+  loadMqtt();
+  setInterval(()=>{
+    const netTab = $("tab-net");
+    if(netTab && !netTab.classList.contains("hide")) loadMqtt();
+  }, 5000);
+}
+init();
 </script>
 </body>
 </html>
