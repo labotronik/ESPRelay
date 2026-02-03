@@ -189,6 +189,9 @@ static AuthConfig authCfg = {"admin", "admin"};
 #ifndef FW_VERSION
 #define FW_VERSION "dev"
 #endif
+#ifndef FW_TAG
+#define FW_TAG ""
+#endif
 
 
 // ===================== Etat IO =====================
@@ -1734,6 +1737,7 @@ static void sendJsonState(Client& c){
   doc["total_relays"] = totalRelays;
   doc["total_inputs"] = totalInputs;
   doc["fw"] = FW_VERSION;
+  if(strlen(FW_TAG) > 0) doc["fw_tag"] = FW_TAG;
   doc["uptime_ms"] = (uint32_t)millis();
 
   String out; serializeJson(doc, out);

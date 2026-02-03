@@ -1057,7 +1057,8 @@ function renderState(s){
     $("uptime").textContent = `${t("uptime.label","Uptime")}: ${formatUptime(s.uptime_ms)}`;
   }
   if(s.fw !== undefined){
-    $("fw").textContent = `FW: ${s.fw || "--"}`;
+    const tag = s.fw_tag ? ` (${s.fw_tag})` : "";
+    $("fw").textContent = `FW: ${s.fw || "--"}${tag}`;
   }
   updateTotalsFromState(s);
 

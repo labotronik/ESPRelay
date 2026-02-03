@@ -3,30 +3,28 @@ import subprocess
 
 project_dir = env.get("PROJECT_DIR", env.Dir("$").abspath)
 
-try:
-    ver = subprocess.check_output(
-        ["git", "describe", "--always", "--dirty", "--tags"],
+def git_cmd(args):
+    return subprocess.check_output(
+        ["git"] + args,
         cwd=project_dir,
         stderr=subprocess.STDOUT,
         text=True,
     ).strip()
+
+try:
+    ver = git_cmd(["describe", "--always", "--dirty", "--tags"])
 except Exception:
     try:
-        ver = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=project_dir,
-            stderr=subprocess.STDOUT,
-            text=True,
-        ).strip()
-        dirty = subprocess.check_output(
-            ["git", "status", "--porcelain"],
-            cwd=project_dir,
-            stderr=subprocess.STDOUT,
-            text=True,
-        ).strip()
+        ver = git_cmd(["rev-parse", "--short", "HEAD"])
+        dirty = git_cmd(["status", "--porcelain"])
         if dirty:
             ver += "-dirty"
     except Exception:
         ver = "unknown"
 
-env.Append(BUILD_FLAGS=[f'-DFW_VERSION=\\"{ver}\\"'])
+try:
+    tag = git_cmd(["describe", "--tags", "--abbrev=0"])
+except Exception:
+    tag = ""
+
+env.Append(BUILD_FLAGS=[f'-DFW_VERSION=\\"{ver}\\"', f'-DFW_TAG=\\"{tag}\\"'])
