@@ -109,6 +109,7 @@
   <h1 data-i18n="page.header">🧠 ESPRelay4 - Controller</h1>
   <div class="inline">
     <span id="net" class="pill">ETH: ?</span>
+    <span id="fw" class="pill">FW: --</span>
     <span id="hb" class="pill"><span class="hb-dot"></span><span id="uptime">Uptime: --</span></span>
     <span id="msg"></span>
     <button class="small" id="auth_logout_top" onclick="logout()" data-i18n="setup.logout" style="display:none;">Logout</button>
@@ -1055,6 +1056,9 @@ function renderState(s){
   if(typeof s.uptime_ms === "number"){
     $("uptime").textContent = `${t("uptime.label","Uptime")}: ${formatUptime(s.uptime_ms)}`;
   }
+  if(s.fw !== undefined){
+    $("fw").textContent = `FW: ${s.fw || "--"}`;
+  }
   updateTotalsFromState(s);
 
   const shRelays = getShutterRelaySet();
@@ -1123,9 +1127,16 @@ function renderState(s){
       `;
     }).join("");
 
+    const statusBadge = (s.modules_status && s.modules_status[m] === 0)
+      ? `<span class="pill" style="margin-left:6px;">OFFLINE</span>`
+      : "";
+    const failCount = (s.modules_fail && typeof s.modules_fail[m] === "number") ? s.modules_fail[m] : null;
+    const failBadge = (failCount !== null && failCount > 0)
+      ? `<span class="pill" style="margin-left:6px;">read fail: ${failCount}</span>`
+      : "";
     modules.push(`
       <div class="module-card">
-        <b>${tf("module.title",{n:m+1},"Module {n}")}</b>
+        <b>${tf("module.title",{n:m+1},"Module {n}")}</b>${statusBadge}${failBadge}
         <div class="sep"></div>
         <div class="two" style="margin-bottom:6px;">
           <div><b>${t("dashboard.relays","Relays")}</b></div>
@@ -1445,17 +1456,27 @@ async function uploadOta(kind){
   if(prog){ prog.value = 0; prog.max = 100; }
   if(pct) pct.textContent = "0%";
   if(wrap) wrap.style.display = "flex";
-  if(statusEl) statusEl.textContent = t("ota.uploading","Uploading…");
+  if(statusEl) statusEl.textContent = t("ota.hashing","Calculating checksum…");
 
-  const boundary = "----esprelay4" + Math.random().toString(16).slice(2);
-  const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: application/octet-stream\r\n\r\n`;
-  const tail = `\r\n--${boundary}--\r\n`;
-  const total = head.length + file.size + tail.length;
-  let sent = 0;
+  let hashHex = "";
+  try{
+    const buf = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    const bytes = new Uint8Array(digest);
+    hashHex = Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join("");
+  }catch(e){
+    if(statusEl) statusEl.textContent = "";
+    if(wrap) wrap.style.display = "none";
+    toast(t("toast.ota_hash_fail","Checksum failed"), false);
+    return;
+  }
+
+  if(statusEl) statusEl.textContent = t("ota.uploading","Uploading…");
 
   const xhr = new XMLHttpRequest();
   xhr.open("POST", kind === "fw" ? "/api/ota" : "/api/otafs", true);
-  xhr.setRequestHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.setRequestHeader("X-Checksum-Sha256", hashHex);
   if(auth) xhr.setRequestHeader("Authorization", auth);
 
   xhr.upload.onprogress = (e)=>{
@@ -1477,8 +1498,7 @@ async function uploadOta(kind){
     }
   };
 
-  const blob = new Blob([head, file, tail], {type:"multipart/form-data; boundary=" + boundary});
-  xhr.send(blob);
+  xhr.send(file);
 }
 
 ["mqtt_enabled","mqtt_host","mqtt_port","mqtt_user","mqtt_pass","mqtt_client","mqtt_base","mqtt_disc","mqtt_retain"]

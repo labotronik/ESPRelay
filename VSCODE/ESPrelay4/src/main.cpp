@@ -16,8 +16,8 @@
 //   PUT  /api/rules        -> remplace les règles (validation volet + conflits)
 //   PUT  /api/net          -> applique + sauvegarde config réseau
 //   PUT  /api/wifi         -> active/désactive le WiFi
-//   POST /api/ota          -> update firmware (multipart/form-data)
-//   POST /api/otafs        -> update LittleFS (multipart/form-data)
+//   POST /api/ota          -> update firmware (application/octet-stream)
+//   POST /api/otafs        -> update LittleFS (application/octet-stream)
 //   POST /api/override     -> override d'un relais (REFUSE si relais réservé volet)
 //   POST /api/shutter      -> commande volet (UP/DOWN/STOP) (seul moyen "API" de bouger les relais volet)
 
@@ -28,6 +28,7 @@
 #include <Ethernet.h>
 #include <WiFi.h>
 #include <Update.h>
+#include <mbedtls/sha256.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
@@ -185,6 +186,10 @@ struct AuthConfig {
 
 static AuthConfig authCfg = {"admin", "admin"};
 
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+
 
 // ===================== Etat IO =====================
 bool inputs[MAX_INPUTS] = {0};
@@ -196,6 +201,9 @@ bool relayFromShutter[MAX_RELAYS] = {0};
 
 uint8_t pcaOutCache[PCA_MAX_MODULES] = {0};
 bool pcaPresent[PCA_MAX_MODULES] = {false};
+bool pcaAlive[PCA_MAX_MODULES] = {false};
+uint8_t pcaFailCount[PCA_MAX_MODULES] = {0};
+uint32_t pcaLastOkMs[PCA_MAX_MODULES] = {0};
 uint8_t pcaCount = 0;
 uint8_t totalRelays = 4;
 uint8_t totalInputs = 4;
@@ -222,19 +230,26 @@ JsonDocument rulesDoc;
 // I2C helpers (STOP entre write et read => évite i2cWriteReadNonStop)
 // ===============================================================
 static bool i2cReadReg8(uint8_t addr, uint8_t reg, uint8_t &val) {
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  if (Wire.endTransmission(true) != 0) return false; // STOP
-  if (Wire.requestFrom((int)addr, 1) != 1) return false;
-  val = Wire.read();
-  return true;
+  for(int attempt=0; attempt<3; attempt++){
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) { delay(2); continue; } // STOP
+    if (Wire.requestFrom((int)addr, 1) != 1) { delay(2); continue; }
+    val = Wire.read();
+    return true;
+  }
+  return false;
 }
 
 static bool i2cWriteReg8(uint8_t addr, uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  Wire.write(val);
-  return Wire.endTransmission(true) == 0; // STOP
+  for(int attempt=0; attempt<3; attempt++){
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    if (Wire.endTransmission(true) == 0) return true; // STOP
+    delay(2);
+  }
+  return false;
 }
 
 // ===============================================================
@@ -270,7 +285,8 @@ static String defaultWifiSsid() {
 }
 
 static void wifiCfgToJson(String &out) {
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   doc["enabled"] = wifiCfg.enabled ? 1 : 0;
   doc["ssid"] = wifiCfg.ssid;
   doc["pass"] = wifiCfg.pass;
@@ -296,7 +312,8 @@ static bool loadWifiCfg(){
     Serial.println("[WIFI] created default /wifi.json");
     return true;
   }
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   auto err = deserializeJson(doc, s);
   if(err){
     Serial.printf("[WIFI] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -356,7 +373,8 @@ static void applyWifiCfg(){
 
 // Auth config (LittleFS)
 static void authCfgToJson(String &out){
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   doc["user"] = authCfg.user;
   doc["pass"] = authCfg.pass;
   serializeJsonPretty(doc, out);
@@ -375,7 +393,8 @@ static bool loadAuthCfg(){
     Serial.println("[AUTH] created default /auth.json");
     return true;
   }
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   auto err = deserializeJson(doc, s);
   if(err){
     Serial.printf("[AUTH] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -473,7 +492,8 @@ static bool parseIp(const String& s, IPAddress &out) {
 }
 
 static void netCfgToJson(String &out) {
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   doc["mode"] = netCfg.dhcp ? "dhcp" : "static";
   if(netCfg.dhcp){
     doc["ip"] = Ethernet.localIP().toString();
@@ -506,7 +526,8 @@ static bool loadNetCfg() {
     Serial.println("[NET] created default /net.json");
     return true;
   }
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   auto err = deserializeJson(doc, s);
   if (err) {
     Serial.printf("[NET] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -606,8 +627,13 @@ static void pcaScanAndInit() {
   for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
     uint8_t addr = PCA_BASE_ADDR + m;
     pcaPresent[m] = false;
+    pcaAlive[m] = false;
+    pcaFailCount[m] = 0;
+    pcaLastOkMs[m] = 0;
     if (pcaInitModule(addr, pcaOutCache[m])) {
       pcaPresent[m] = true;
+      pcaAlive[m] = true;
+      pcaLastOkMs[m] = millis();
       if ((int)m > lastPresent) lastPresent = m;
     }
   }
@@ -627,12 +653,23 @@ static void pcaScanAndInit() {
 static void pcaReadInputs() {
   for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
     uint8_t base = m * INPUTS_PER_MODULE;
+    uint8_t in = 0;
     if (!pcaPresent[m]) {
-      for (uint8_t i = 0; i < INPUTS_PER_MODULE; i++) inputs[base + i] = false;
+      // try to recover: probe read even if not marked present
+      if(!i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)){
+        pcaFailCount[m] = (pcaFailCount[m] < 255) ? (uint8_t)(pcaFailCount[m] + 1) : 255;
+        if(pcaFailCount[m] >= 3) pcaAlive[m] = false;
+        continue;
+      }
+      pcaPresent[m] = true;
+    } else if(!i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)){
+      pcaFailCount[m] = (pcaFailCount[m] < 255) ? (uint8_t)(pcaFailCount[m] + 1) : 255;
+      if(pcaFailCount[m] >= 3) pcaAlive[m] = false;
       continue;
     }
-    uint8_t in = 0;
-    if(!i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)) continue;
+    pcaFailCount[m] = 0;
+    pcaAlive[m] = true;
+    pcaLastOkMs[m] = millis();
     for(uint8_t i=0;i<INPUTS_PER_MODULE;i++){
       inputs[base + i] = (in >> (4+i)) & 0x1; // IO4..IO7
     }
@@ -787,7 +824,8 @@ static String normalizeBaseTopic(const String& in) {
 }
 
 static void mqttCfgToJson(String &out) {
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   doc["enabled"] = mqttCfg.enabled ? 1 : 0;
   doc["host"] = mqttCfg.host;
   doc["port"] = mqttCfg.port;
@@ -814,7 +852,8 @@ static bool loadMqttCfg() {
     Serial.println("[MQTT] created default /mqtt.json");
     return true;
   }
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   auto err = deserializeJson(doc, s);
   if (err) {
     Serial.printf("[MQTT] JSON parse error -> keep default (%s)\n", err.c_str());
@@ -861,8 +900,10 @@ static void mqttPublishDiscovery() {
   String avail = base + "/status";
   String id = node;
 
+  static JsonDocument doc;
+
   for (int i = 0; i < totalRelays; i++) {
-    JsonDocument doc;
+    doc.clear();
     String uid = id + "_relay_" + String(i+1);
     doc["name"] = "Relay " + String(i+1);
     doc["uniq_id"] = uid;
@@ -884,7 +925,7 @@ static void mqttPublishDiscovery() {
   }
 
   for (int i = 0; i < totalInputs; i++) {
-    JsonDocument doc;
+    doc.clear();
     String uid = id + "_input_" + String(i+1);
     doc["name"] = "Input " + String(i+1);
     doc["uniq_id"] = uid;
@@ -906,7 +947,7 @@ static void mqttPublishDiscovery() {
 
   for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
-    JsonDocument doc;
+    doc.clear();
     String uid = id + "_shutter_" + String(s+1);
     doc["name"] = shCfg[s].name;
     doc["uniq_id"] = uid;
@@ -932,7 +973,7 @@ static void mqttPublishDiscovery() {
 
   // Temperature sensors
   for (int i = 0; i < tempCount; i++) {
-    JsonDocument doc;
+    doc.clear();
     String uid = id + "_temp_" + String(i+1);
     doc["name"] = "Temp " + String(i+1);
     doc["uniq_id"] = uid;
@@ -954,7 +995,7 @@ static void mqttPublishDiscovery() {
   }
 
   if (dhtPresent) {
-    JsonDocument doc;
+    doc.clear();
     String uid = id + "_temp_dht22";
     doc["name"] = "Temp DHT22";
     doc["uniq_id"] = uid;
@@ -975,7 +1016,7 @@ static void mqttPublishDiscovery() {
     mqttPublish(topic, out, true);
   }
   if (dhtPresent) {
-    JsonDocument doc;
+    doc.clear();
     String uid = id + "_hum_dht22";
     doc["name"] = "Humidité DHT22";
     doc["uniq_id"] = uid;
@@ -1527,6 +1568,7 @@ static void buildFinalRelays() {
       relays[shCfg[s].down_relay-1] = false;
     }
   }
+
 }
 
 // ===============================================================
@@ -1616,11 +1658,14 @@ static void sendText(Client& c, const String& body, const char* ctype, int code=
 }
 
 static void sendJsonState(Client& c){
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   JsonArray inA = doc["inputs"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
   JsonArray ovA = doc["override"].to<JsonArray>();
   JsonArray rsA = doc["reserved"].to<JsonArray>();
+  JsonArray modA = doc["modules_status"].to<JsonArray>();
+  JsonArray modF = doc["modules_fail"].to<JsonArray>();
 
   for(int i=0;i<totalInputs;i++){
     inA.add(inputs[i] ? 1 : 0);
@@ -1629,6 +1674,11 @@ static void sendJsonState(Client& c){
     reA.add(relays[i] ? 1 : 0);
     ovA.add(overrideRelay[i]);
     rsA.add(reservedByShutter[i] ? 1 : 0);
+  }
+  for(int m=0; m<pcaCount; m++){
+    const bool ok = (pcaLastOkMs[m] != 0) && (millis() - pcaLastOkMs[m] < 5000);
+    modA.add(ok ? 1 : 0);
+    modF.add(pcaFailCount[m]);
   }
 
   JsonObject eth = doc["eth"].to<JsonObject>();
@@ -1683,6 +1733,7 @@ static void sendJsonState(Client& c){
   doc["inputs_per"] = INPUTS_PER_MODULE;
   doc["total_relays"] = totalRelays;
   doc["total_inputs"] = totalInputs;
+  doc["fw"] = FW_VERSION;
   doc["uptime_ms"] = (uint32_t)millis();
 
   String out; serializeJson(doc, out);
@@ -1715,7 +1766,8 @@ static void sendJsonBackup(Client& c){
   loadNetCfg();
   loadMqttCfg();
 
-  JsonDocument doc;
+  static JsonDocument doc;
+  doc.clear();
   doc["rules"] = rulesDoc;
 
   JsonObject net = doc["net"].to<JsonObject>();
@@ -1838,134 +1890,55 @@ static void sendJsonRules(Client& c){
   sendText(c, out, "application/json");
 }
 
-static bool readLineBody(Client& c, int &remaining, String &out){
-  out = "";
-  while(remaining > 0){
-    while(!c.available()) delay(1);
-    char ch = c.read();
-    remaining--;
-    if(ch == '\n') break;
-    if(ch != '\r') out += ch;
-  }
-  return true;
-}
-
-static int findPattern(const uint8_t* data, int len, const char* pat, int patLen){
-  if(patLen <= 0 || len < patLen) return -1;
-  for(int i=0; i <= len - patLen; i++){
-    bool ok = true;
-    for(int j=0; j<patLen; j++){
-      if(data[i+j] != (uint8_t)pat[j]){ ok = false; break; }
-    }
-    if(ok) return i;
-  }
-  return -1;
-}
-
-static bool handleOtaMultipart(Client& c, int contentLen, const String& contentType, bool isFs, String &err){
-  int b = contentType.indexOf("boundary=");
-  if(b < 0){ err = "no boundary"; return false; }
-  String boundary = contentType.substring(b + 9);
-  boundary.trim();
-  if(boundary.startsWith("\"") && boundary.endsWith("\"")){
-    boundary = boundary.substring(1, boundary.length()-1);
-  }
-  if(boundary.length() == 0){ err = "empty boundary"; return false; }
-
-  int remaining = contentLen;
-  String line;
-  readLineBody(c, remaining, line); // --boundary
-  if(!line.startsWith("--" + boundary)){
-    err = "bad boundary";
-    return false;
-  }
-  // part headers
-  while(true){
-    if(remaining <= 0){ err = "no part header"; return false; }
-    readLineBody(c, remaining, line);
-    if(line.length() == 0) break; // end of headers
-  }
-
-  if(!Update.begin(UPDATE_SIZE_UNKNOWN, isFs ? U_SPIFFS : U_FLASH)){
+static bool handleOtaStream(Client& c, int contentLen, bool isFs, const String& expectedSha256, String &err){
+  if(contentLen <= 0){ err = "empty body"; return false; }
+  if(!Update.begin(contentLen, isFs ? U_SPIFFS : U_FLASH)){
     err = "update begin failed";
     return false;
   }
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts_ret(&ctx, 0);
 
-  String patStr = "\r\n--" + boundary;
-  const char* pat = patStr.c_str();
-  const int patLen = patStr.length();
-  if(patLen <= 0){ err = "bad pattern"; Update.abort(); return false; }
-
-  const int BUF_SIZE = 256;
-  uint8_t* tail = (uint8_t*)malloc(patLen);
-  uint8_t* tmp  = (uint8_t*)malloc(BUF_SIZE + patLen);
-  uint8_t* buf  = (uint8_t*)malloc(BUF_SIZE);
-  if(!tail || !tmp || !buf){
-    if(tail) free(tail);
-    if(tmp) free(tmp);
-    if(buf) free(buf);
+  const int BUF_SIZE = 512;
+  uint8_t* buf = (uint8_t*)malloc(BUF_SIZE);
+  if(!buf){
     err = "oom";
     Update.abort();
+    mbedtls_sha256_free(&ctx);
     return false;
   }
-  int tailLen = 0;
-  bool found = false;
-
+  int remaining = contentLen;
   while(remaining > 0){
     int toRead = remaining > BUF_SIZE ? BUF_SIZE : remaining;
     int n = c.read(buf, toRead);
     if(n <= 0){ delay(1); continue; }
     remaining -= n;
-
-    // build temp buffer: [tail][new]
-    if(tailLen > 0) memcpy(tmp, tail, tailLen);
-    memcpy(tmp + tailLen, buf, n);
-    int tmpLen = tailLen + n;
-
-    int pos = findPattern(tmp, tmpLen, pat, patLen);
-    if(pos >= 0){
-      if(Update.write(tmp, pos) != (size_t)pos){
-        err = "write failed";
-        Update.abort();
-        free(tail); free(tmp);
-        return false;
-      }
-      found = true;
-      break;
-    }
-
-    if(tmpLen >= patLen){
-      int writeLen = tmpLen - (patLen - 1);
-      if(Update.write(tmp, writeLen) != (size_t)writeLen){
-        err = "write failed";
-        Update.abort();
-        free(tail); free(tmp);
-        return false;
-      }
-      memcpy(tail, tmp + writeLen, patLen - 1);
-      tailLen = patLen - 1;
-    } else {
-      memcpy(tail, tmp, tmpLen);
-      tailLen = tmpLen;
+    mbedtls_sha256_update_ret(&ctx, buf, n);
+    if(Update.write(buf, n) != (size_t)n){
+      free(buf);
+      err = "write failed";
+      Update.abort();
+      mbedtls_sha256_free(&ctx);
+      return false;
     }
   }
-
-  free(tail);
-  free(tmp);
   free(buf);
+  uint8_t hash[32];
+  mbedtls_sha256_finish_ret(&ctx, hash);
+  mbedtls_sha256_free(&ctx);
 
-  if(!found){
-    err = "boundary not found";
-    Update.abort();
-    return false;
-  }
-
-  while(remaining > 0){
-    if(c.available()){
-      c.read();
-      remaining--;
-    } else {
-      delay(1);
+  if(expectedSha256.length() == 64){
+    char hex[65];
+    for(int i=0;i<32;i++) sprintf(hex + (i*2), "%02x", hash[i]);
+    hex[64] = 0;
+    String got = String(hex);
+    String exp = expectedSha256;
+    exp.toLowerCase();
+    if(got != exp){
+      err = "checksum mismatch";
+      Update.abort();
+      return false;
     }
   }
 
@@ -1973,7 +1946,6 @@ static bool handleOtaMultipart(Client& c, int contentLen, const String& contentT
     err = Update.errorString();
     return false;
   }
-
   return true;
 }
 
@@ -2060,6 +2032,7 @@ static void handleHttpClient(Client& client){
   int contentLen = 0;
   String authHeader = "";
   String contentType = "";
+  String checksumSha256 = "";
   while(true){
     String h = readLine(client);
     if(h.length()==0) break;
@@ -2072,6 +2045,10 @@ static void handleHttpClient(Client& client){
     if(h.startsWith("Content-Type:")){
       contentType = h.substring(13);
       contentType.trim();
+    }
+    if(h.startsWith("X-Checksum-Sha256:")){
+      checksumSha256 = h.substring(18);
+      checksumSha256.trim();
     }
   }
 
@@ -2239,13 +2216,13 @@ static void handleHttpClient(Client& client){
   }
   else if(method=="POST" && path=="/api/ota"){
     if(!authed){ sendAuthRequired(client); return; }
-    if(contentLen <= 0 || contentType.indexOf("multipart/form-data") < 0){
-      sendText(client, String("{\"ok\":false,\"error\":\"multipart required\"}"), "application/json", 400);
+    if(contentLen <= 0 || contentType.indexOf("application/octet-stream") < 0){
+      sendText(client, String("{\"ok\":false,\"error\":\"octet-stream required\"}"), "application/json", 400);
       client.stop();
       return;
     }
     String errMsg;
-    if(!handleOtaMultipart(client, contentLen, contentType, false, errMsg)){
+    if(!handleOtaStream(client, contentLen, false, checksumSha256, errMsg)){
       sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
     } else {
       sendText(client, String("{\"ok\":true,\"reboot\":true}"), "application/json");
@@ -2255,13 +2232,13 @@ static void handleHttpClient(Client& client){
   }
   else if(method=="POST" && path=="/api/otafs"){
     if(!authed){ sendAuthRequired(client); return; }
-    if(contentLen <= 0 || contentType.indexOf("multipart/form-data") < 0){
-      sendText(client, String("{\"ok\":false,\"error\":\"multipart required\"}"), "application/json", 400);
+    if(contentLen <= 0 || contentType.indexOf("application/octet-stream") < 0){
+      sendText(client, String("{\"ok\":false,\"error\":\"octet-stream required\"}"), "application/json", 400);
       client.stop();
       return;
     }
     String errMsg;
-    if(!handleOtaMultipart(client, contentLen, contentType, true, errMsg)){
+    if(!handleOtaStream(client, contentLen, true, checksumSha256, errMsg)){
       sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
     } else {
       sendText(client, String("{\"ok\":true,\"reboot\":true}"), "application/json");
@@ -2491,12 +2468,12 @@ void setup() {
 }
 
 void loop() {
+  // read inputs early to update module status before serving HTTP
+  pcaReadInputs();
+
   handleHttp();
   updateWifiState();
   heartbeatTick();
-
-  // read inputs
-  pcaReadInputs();
 
   // tick shutter BEFORE computing simple rules, so it can use prevInputs if needed
   shutterTick();
