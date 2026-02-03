@@ -6,6 +6,7 @@
   <title>ESPRelay</title>
   <style>
     :root { --b:#ddd; --bg:#f7f7f7; --cell-w:220px; }
+    *{box-sizing:border-box}
     body{font-family:system-ui,Arial;margin:16px;max-width:1200px;background:var(--bg)}
     body.dark{--b:#3c3c3c;--bg:#1f1f1f;background:#121212;color:#eee}
     h1{margin:0 0 8px 0}
@@ -62,7 +63,7 @@
     .two{display:grid;grid-template-columns:minmax(160px,var(--cell-w)) minmax(160px,var(--cell-w));gap:6px;justify-content:start}
     .hr{height:1px;background:var(--b);margin:8px 0}
     .shutter-relay{background:#f2f2f2;color:#777;border-color:#ddd}
-    .led{display:inline-block;width:12px;height:12px;border-radius:999px;border:1px solid #bbb;background:#e6e6e6;vertical-align:middle;margin-right:6px}
+    .led{display:inline-block;width:16px;height:16px;border-radius:999px;border:1px solid #bbb;background:#e6e6e6;vertical-align:middle;margin-right:6px}
     .led.on{background:#27c046;border-color:#1aa13a}
     .switch{position:relative;display:inline-block;width:44px;height:24px;vertical-align:middle;margin:0 6px}
     .switch input{opacity:0;width:0;height:0}
@@ -78,6 +79,16 @@
     .subcard .switch{width:36px;height:20px}
     .subcard .slider:before{height:14px;width:14px;left:3px;top:3px}
     .subcard .switch input:checked + .slider:before{transform:translateX(16px)}
+    #tab-setup .inline{justify-content:flex-start;align-items:flex-start}
+    #tab-setup .card{text-align:left}
+    .form-grid{display:grid;grid-template-columns:140px 1fr;gap:8px 10px;align-items:center}
+    .form-grid .muted{justify-self:start}
+    .form-grid input,
+    .form-grid select{width:100%;max-width:100%}
+    @media(max-width:520px){
+      .form-grid{grid-template-columns:1fr}
+      .form-grid .muted{justify-self:start}
+    }
     @media(max-width:820px){
       body{margin:10px}
       .tabs{flex-wrap:wrap}
@@ -95,7 +106,7 @@
   </style>
 </head>
 <body>
-  <h1 data-i18n="page.header">ESPRelay4 - Controller</h1>
+  <h1 data-i18n="page.header">🧠 ESPRelay4 - Controller</h1>
   <div class="inline">
     <span id="net" class="pill">ETH: ?</span>
     <span id="hb" class="pill"><span class="hb-dot"></span><span id="uptime">Uptime: --</span></span>
@@ -119,7 +130,7 @@
   <div id="tab-dash">
     <div class="row">
       <div class="card" id="login_card" style="flex:1;min-width:320px">
-        <h3 data-i18n="dashboard.login_title">Login</h3>
+        <h3 data-i18n="dashboard.login_title">🔐 Login</h3>
         <div class="muted" data-i18n="dashboard.login_desc">Login required to modify settings.</div>
         <div class="sep"></div>
         <div class="inline">
@@ -139,14 +150,14 @@
 
     <div class="row">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.inputs">Inputs</h3>
+        <h3 data-i18n="dashboard.inputs">🧩 Modules</h3>
         <div id="inputsView" class="modules">...</div>
       </div>
     </div>
 
     <div class="row" style="margin-top:12px;">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.relays">Relays</h3>
+        <h3 data-i18n="dashboard.relays">⚡ Relays</h3>
         <div id="relaysView" class="modules">...</div>
         <div class="sep"></div>
         <button class="small" onclick="setAllAuto()" data-i18n="dashboard.all_auto">All AUTO</button>
@@ -155,14 +166,14 @@
 
     <div class="row hide" style="margin-top:12px;" id="tempsRow">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.temps">Temperatures</h3>
+        <h3 data-i18n="dashboard.temps">🌡️ Temperatures</h3>
         <div id="tempsView" class="inline">...</div>
       </div>
     </div>
 
     <div class="row" style="margin-top:12px;">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.shutters">Shutters</h3>
+        <h3 data-i18n="dashboard.shutters">🪟 Shutters</h3>
         <div id="shutterDash" data-i18n="shutter.none">No shutter configured.</div>
       </div>
     </div>
@@ -193,53 +204,39 @@
   <!-- BACKUP -->
   <div id="tab-setup" class="hide">
     <div class="card" style="max-width:640px;">
-      <h3 data-i18n="setup.title">Setup</h3>
+      <h3 data-i18n="setup.title">🧰 Setup</h3>
       <div class="muted" data-i18n="setup.desc">Login required to modify settings.</div>
       <div class="sep"></div>
       <div class="notice" data-i18n="setup.change_note">Change credentials</div>
-      <div class="inline" style="margin-top:8px;">
+      <div class="form-grid" style="margin-top:8px;">
         <span class="muted" data-i18n="setup.new_user">New user</span>
         <input id="auth_new_user" type="text">
         <span class="muted" data-i18n="setup.new_pass">New pass</span>
         <input id="auth_new_pass" type="password">
+      </div>
+      <div class="inline" style="margin-top:8px;">
         <button class="primary" onclick="saveAuth()" data-i18n="setup.save">Save</button>
       </div>
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="network.title">Network configuration</h3>
+      <h3 data-i18n="network.title">🌐 Network configuration</h3>
       <div class="sep"></div>
 
-      <div class="inline">
+      <div class="form-grid">
         <span class="muted" data-i18n="network.mac">MAC</span>
         <span id="net_mac" class="pill">--</span>
-      </div>
-
-      <div class="sep"></div>
-
-      <div class="inline">
         <span class="muted" data-i18n="network.mode">Mode</span>
         <select id="net_mode">
           <option value="dhcp" data-i18n="network.mode.dhcp">DHCP</option>
           <option value="static" data-i18n="network.mode.static">Statique</option>
         </select>
-      </div>
-
-      <div class="sep"></div>
-
-      <div class="inline">
         <span class="muted" data-i18n="network.ip">IP</span>
         <input id="net_ip" type="text" placeholder="192.168.1.50">
-      </div>
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="network.gw">Passerelle</span>
         <input id="net_gw" type="text" placeholder="192.168.1.1">
-      </div>
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="network.mask">Masque</span>
         <input id="net_sn" type="text" placeholder="255.255.255.0">
-      </div>
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="network.dns">DNS</span>
         <input id="net_dns" type="text" placeholder="192.168.1.1">
       </div>
@@ -250,7 +247,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="wifi.title">WiFi Access Point</h3>
+      <h3 data-i18n="wifi.title">📶 WiFi Access Point</h3>
       <div class="muted" data-i18n="wifi.desc">AP always enabled unless explicitly disabled.</div>
       <div class="sep"></div>
 
@@ -262,18 +259,16 @@
         <span class="muted" data-i18n="wifi.ssid">SSID</span>
         <span id="wifi_ssid" class="pill">--</span>
       </div>
-      <div class="inline" style="margin-top:8px;">
+      <div class="form-grid">
         <span class="muted" data-i18n="wifi.pass">Password</span>
         <span id="wifi_pass" class="pill">--</span>
-      </div>
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="wifi.new_pass">New password</span>
         <input id="wifi_new_pass" type="password" placeholder="********">
-        <button class="small" onclick="saveWifiPass()" data-i18n="wifi.save_pass">Save WiFi password</button>
-      </div>
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="wifi.ip">IP</span>
         <span id="wifi_ip" class="pill">--</span>
+      </div>
+      <div class="inline" style="margin-top:8px;">
+        <button class="small" onclick="saveWifiPass()" data-i18n="wifi.save_pass">Save WiFi password</button>
       </div>
 
       <div class="sep"></div>
@@ -282,7 +277,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="mqtt.title">MQTT / Home Assistant</h3>
+      <h3 data-i18n="mqtt.title">🔌 MQTT / Home Assistant</h3>
       <div class="muted" data-i18n="mqtt.desc">Broker + topics configuration. Home Assistant auto-discovery.</div>
       <div class="sep"></div>
 
@@ -294,33 +289,23 @@
         <label><input id="mqtt_enabled" type="checkbox"> <span data-i18n="mqtt.enable">Enable MQTT</span></label>
       </div>
 
-      <div class="inline" style="margin-top:8px;">
+      <div class="form-grid" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.broker">Broker</span>
         <input id="mqtt_host" type="text" placeholder="192.168.1.43">
         <span class="muted" data-i18n="mqtt.port">Port</span>
         <input id="mqtt_port" type="number" min="1" max="65535" value="1883">
-      </div>
-
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.user">User</span>
         <input id="mqtt_user" type="text" placeholder="">
         <span class="muted" data-i18n="mqtt.pass">Pass</span>
         <input id="mqtt_pass" type="password" placeholder="">
-      </div>
-
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.client_id">Client ID</span>
         <input id="mqtt_client" type="text" placeholder="ESPRelay4">
-      </div>
-
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.base_topic">Base topic</span>
         <input id="mqtt_base" type="text" placeholder="esprelay4">
-      </div>
-
-      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.discovery_prefix">Discovery prefix</span>
         <input id="mqtt_disc" type="text" placeholder="homeassistant">
+      </div>
+      <div class="inline" style="margin-top:8px;">
         <label><input id="mqtt_retain" type="checkbox" checked> <span data-i18n="mqtt.retain">Retain</span></label>
       </div>
 
@@ -330,7 +315,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="ota.title">OTA Update</h3>
+      <h3 data-i18n="ota.title">⬆️ OTA Update</h3>
       <div class="muted" data-i18n="ota.desc">Upload firmware.bin or littlefs.bin</div>
       <div class="sep"></div>
       <div class="inline">
@@ -352,7 +337,7 @@
   <!-- BACKUP -->
   <div id="tab-backup" class="hide">
     <div class="card" style="max-width:640px;">
-      <h3 data-i18n="backup.title">Backup / Restore</h3>
+        <h3 data-i18n="backup.title">💾 Backup / Restore</h3>
       <div class="muted" data-i18n="backup.desc">Export or import the full configuration (rules + network + MQTT).</div>
       <div class="sep"></div>
       <div class="inline">
@@ -1089,7 +1074,7 @@ function renderState(s){
 
       const inputCell = (inVal === null)
         ? `<div class="muted">--</div>`
-        : `<div style="margin:4px 0;"><span class="led ${inVal?'on':''}"></span><b>E${base+idx+1}</b></div>`;
+        : `<div style="margin:4px 0;display:flex;align-items:center;gap:6px;"><span class="led ${inVal?'on':''}"></span><b>E${base+idx+1}</b></div>`;
 
       let relayCell = `<div class="muted">--</div>`;
       if(reVal !== null){
@@ -1108,6 +1093,7 @@ function renderState(s){
               </div>
             </div>
         `;
+        const onEmoji = reVal ? `<span style="margin-left:6px;">⚡</span>` : "";
         relayCell = `
           <div class="${isShutterRelay ? "shutter-relay" : ""}" style="margin:4px 0;">
             <div class="relay-row">
@@ -1118,6 +1104,7 @@ function renderState(s){
                     <input type="checkbox" ${stateChecked} onchange="setOverride(${i+1}, this.checked ? 'FORCE_ON' : 'FORCE_OFF')">
                     <span class="slider"></span>
                   </label>
+                  ${onEmoji}
                 `}
               </div>
             </div>

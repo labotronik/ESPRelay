@@ -397,7 +397,7 @@ static bool factoryResetHeld(){
   while(millis() - start < 10000){
     if(digitalRead(PIN_FACTORY) != LOW) return false;
     uint32_t now = millis();
-    if(now - lastBlink >= 250){
+    if(now - lastBlink >= 125){
       lastBlink = now;
       ledOn = !ledOn;
       digitalWrite(PIN_LED, ledOn ? 1 : 0);
@@ -406,6 +406,23 @@ static bool factoryResetHeld(){
   }
   digitalWrite(PIN_LED, 1);
   return true;
+}
+
+static void heartbeatTick(){
+  static uint32_t lastHb = 0;
+  static bool hbOn = false;
+  uint32_t now = millis();
+  if(now - lastHb >= 1000){
+    lastHb = now;
+    hbOn = !hbOn;
+    digitalWrite(PIN_LED, hbOn ? 1 : 0);
+  }
+}
+
+static void logFactoryPinState(){
+  pinMode(PIN_FACTORY, INPUT_PULLUP);
+  int v = digitalRead(PIN_FACTORY);
+  Serial.printf("[FACTORY] PIN_FACTORY=%d (%s)\n", v, (v==LOW ? "PRESSED" : "RELEASED"));
 }
 
 static void doFactoryReset(){
@@ -571,7 +588,8 @@ static bool pcaInitModule(uint8_t addr, uint8_t &outCache) {
   Wire.beginTransmission(addr);
   if (Wire.endTransmission(true) != 0) return false;
 
-  if (!i2cWriteReg8(addr, REG_POL, 0x00)) return false;
+  // Invert inputs IO4..IO7 (pull-up + active-low buttons)
+  if (!i2cWriteReg8(addr, REG_POL, 0xF0)) return false;
   if (!i2cWriteReg8(addr, REG_CFG, 0xF0)) return false; // IO0..3 out, IO4..7 in
 
   // outputs off
@@ -2423,6 +2441,7 @@ void setup() {
     if(f){ Serial.printf("[FS] /index.html size=%u bytes\n", (unsigned)f.size()); f.close(); }
     else Serial.println("[FS] /index.html NOT found (run uploadfs)");
   }
+  logFactoryPinState();
   if(factoryResetHeld()) doFactoryReset();
   loadAuthCfg();
 
@@ -2474,6 +2493,7 @@ void setup() {
 void loop() {
   handleHttp();
   updateWifiState();
+  heartbeatTick();
 
   // read inputs
   pcaReadInputs();
