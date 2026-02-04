@@ -28,6 +28,7 @@
     .pill{display:inline-block;padding:2px 8px;border:1px solid var(--b);border-radius:999px;font-size:.85em;background:var(--bg)}
     .pill.shutter{background:#eee;color:#555;border-color:#ccc}
     .hb-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#27c046;margin-right:6px;animation:hb 1s steps(1,end) infinite}
+    .hb-dot.offline{background:#e53935;animation:none;opacity:1}
     @keyframes hb{50%{opacity:.2}}
     button{padding:8px 10px;border-radius:10px;border:1px solid #aaa;background:#fff;cursor:pointer}
     button.primary{background:var(--bg);font-weight:700}
@@ -106,7 +107,7 @@
   </style>
 </head>
 <body>
-  <h1 data-i18n="page.header">🧠 ESPRelay4 - Controller</h1>
+  <h1 data-i18n="page.header">ESPRelay4 - Controller</h1>
   <div class="inline">
     <span id="net" class="pill">ETH: ?</span>
     <span id="fw" class="pill">FW: --</span>
@@ -131,7 +132,7 @@
   <div id="tab-dash">
     <div class="row">
       <div class="card" id="login_card" style="flex:1;min-width:320px">
-        <h3 data-i18n="dashboard.login_title">🔐 Login</h3>
+        <h3 data-i18n="dashboard.login_title">Login</h3>
         <div class="muted" data-i18n="dashboard.login_desc">Login required to modify settings.</div>
         <div class="sep"></div>
         <div class="inline">
@@ -151,15 +152,8 @@
 
     <div class="row">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.inputs">🧩 Modules</h3>
+        <h3 data-i18n="dashboard.inputs">Modules</h3>
         <div id="inputsView" class="modules">...</div>
-      </div>
-    </div>
-
-    <div class="row" style="margin-top:12px;">
-      <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.relays">⚡ Relays</h3>
-        <div id="relaysView" class="modules">...</div>
         <div class="sep"></div>
         <button class="small" onclick="setAllAuto()" data-i18n="dashboard.all_auto">All AUTO</button>
       </div>
@@ -167,14 +161,14 @@
 
     <div class="row hide" style="margin-top:12px;" id="tempsRow">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.temps">🌡️ Temperatures</h3>
+        <h3 data-i18n="dashboard.temps">Temperatures</h3>
         <div id="tempsView" class="inline">...</div>
       </div>
     </div>
 
     <div class="row" style="margin-top:12px;">
       <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.shutters">🪟 Shutters</h3>
+        <h3 data-i18n="dashboard.shutters">Shutters</h3>
         <div id="shutterDash" data-i18n="shutter.none">No shutter configured.</div>
       </div>
     </div>
@@ -183,7 +177,6 @@
   <!-- PROGRAMMATION -->
   <div id="tab-prog" class="hide">
     <div class="inline" style="margin:8px 0 12px 0;">
-      <button class="primary" onclick="loadRules()" data-i18n="programming.load_rules">Load rules</button>
       <button class="primary" onclick="saveRules()" data-i18n="programming.save_rules">Save rules</button>
       <span class="muted" data-i18n="programming.flash_note">Rules saved in flash.</span>
     </div>
@@ -205,7 +198,7 @@
   <!-- BACKUP -->
   <div id="tab-setup" class="hide">
     <div class="card" style="max-width:640px;">
-      <h3 data-i18n="setup.title">🧰 Setup</h3>
+      <h3 data-i18n="setup.title">Setup</h3>
       <div class="muted" data-i18n="setup.desc">Login required to modify settings.</div>
       <div class="sep"></div>
       <div class="notice" data-i18n="setup.change_note">Change credentials</div>
@@ -221,7 +214,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="network.title">🌐 Network configuration</h3>
+      <h3 data-i18n="network.title">Network configuration</h3>
       <div class="sep"></div>
 
       <div class="form-grid">
@@ -248,7 +241,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="wifi.title">📶 WiFi Access Point</h3>
+      <h3 data-i18n="wifi.title">WiFi Access Point</h3>
       <div class="muted" data-i18n="wifi.desc">AP always enabled unless explicitly disabled.</div>
       <div class="sep"></div>
 
@@ -278,7 +271,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="mqtt.title">🔌 MQTT / Home Assistant</h3>
+      <h3 data-i18n="mqtt.title">MQTT / Home Assistant</h3>
       <div class="muted" data-i18n="mqtt.desc">Broker + topics configuration. Home Assistant auto-discovery.</div>
       <div class="sep"></div>
 
@@ -316,7 +309,7 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="ota.title">⬆️ OTA Update</h3>
+      <h3 data-i18n="ota.title">OTA Update</h3>
       <div class="muted" data-i18n="ota.desc">Upload firmware.bin or littlefs.bin</div>
       <div class="sep"></div>
       <div class="inline">
@@ -338,7 +331,7 @@
   <!-- BACKUP -->
   <div id="tab-backup" class="hide">
     <div class="card" style="max-width:640px;">
-        <h3 data-i18n="backup.title">💾 Backup / Restore</h3>
+        <h3 data-i18n="backup.title">Backup / Restore</h3>
       <div class="muted" data-i18n="backup.desc">Export or import the full configuration (rules + network + MQTT).</div>
       <div class="sep"></div>
       <div class="inline">
@@ -528,6 +521,7 @@ window.saveAuth = async ()=>{
 
 function getModes(){
   return [
+    {id:"NONE", label:t("mode.none","NONE (no rule)")},
     {id:"FOLLOW", label:t("mode.follow","FOLLOW (1 input)")},
     {id:"AND", label:t("mode.and","AND (multi)")},
     {id:"OR", label:t("mode.or","OR (multi)")},
@@ -634,6 +628,20 @@ let mqttCfg = null;
 let mqttDirty = false;
 let totalRelays = 4;
 let totalInputs = 4;
+let lastUptimeMs = null;
+let lastUptimeChangeMs = 0;
+let lastStateFetchMs = 0;
+let shutterActionInFlight = false;
+
+function updateHeartbeatIndicator(){
+  const dot = document.querySelector(".hb-dot");
+  if(!dot) return;
+  const now = Date.now();
+  const staleFetch = lastStateFetchMs === 0 ? true : (now - lastStateFetchMs > 2000);
+  const staleUptime = lastUptimeChangeMs === 0 ? true : (now - lastUptimeChangeMs > 2000);
+  if(staleFetch || staleUptime) dot.classList.add("offline");
+  else dot.classList.remove("offline");
+}
 
 function defaultRules(){
   const rCount = totalRelays || 4;
@@ -641,7 +649,7 @@ function defaultRules(){
   return {
     version: 2,
     relays: Array.from({length:rCount}).map((_,i)=>(
-      { expr:{op:"FOLLOW", in: (i+1<=iCount?i+1:1)}, invert:false, onDelay:0, offDelay:0, pulseMs:200 }
+      { expr:{op:"NONE"}, invert:false, onDelay:0, offDelay:0, pulseMs:200 }
     )),
     shutters: []
   };
@@ -688,11 +696,13 @@ function selectedInputsForRelay(i){
 
 function normalizeRelayExpr(i){
   const r = rules.relays[i];
-  if(!r.expr) r.expr = {op:"FOLLOW", in:1};
+  if(!r.expr) r.expr = {op:"NONE"};
   const op = r.expr.op || "FOLLOW";
   const ins = selectedInputsForRelay(i);
 
-  if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE"){
+  if(op==="NONE"){
+    r.expr = {op:"NONE"};
+  } else if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE"){
     r.expr = {op, in: ins[0] || (r.expr.in || 1)};
   } else {
     r.expr = {op, ins: (ins.length ? ins : (r.expr.ins || [1]))};
@@ -702,7 +712,7 @@ function normalizeRelayExpr(i){
 }
 
 function ruleCard(i, r, isShutterRelay){
-  if(!r.expr) r.expr = {op:"FOLLOW", in:1};
+  if(!r.expr) r.expr = {op:"NONE"};
   const op = r.expr.op || "FOLLOW";
   const checked = new Set();
   if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE"){
@@ -749,7 +759,6 @@ function ruleCard(i, r, isShutterRelay){
 
       <div><b>${t("rule.inputs","Inputs")}</b></div>
       <div class="inline" style="margin-top:6px;">${inputsHtml}</div>
-      <div class="muted" style="margin-top:6px;">${t("rule.inputs_hint","FOLLOW/TOGGLE/PULSE = 1 input. AND/OR/XOR = multiple.")}</div>
 
       <div class="hr"></div>
 
@@ -919,7 +928,7 @@ function renderShutterCards(){
 
         <div class="sep"></div>
         <button class="primary" onclick="applyShutter(${i})">${t("shutter.add_update","Add / Update")}</button>
-        <button class="small" onclick="removeShutter(${i})">${t("shutter.remove","Remove shutter")}</button>
+        <button class="small" onclick="removeShutter(${i}, this)">${t("shutter.remove","Remove shutter")}</button>
       </div>
     `);
   }
@@ -995,18 +1004,24 @@ async function applyShutter(idx){
     toast(e.message, false);
   }
 }
-async function removeShutter(idx){
+async function removeShutter(idx, btn){
   if(!requireAuth()) return;
+  if(shutterActionInFlight) return;
   try{
+    shutterActionInFlight = true;
+    if(btn) btn.disabled = true;
     if(idx >= maxShutters()) return;
     if(!Array.isArray(rules.shutters)) rules.shutters = [];
+    if(rules.shutters[idx] == null) return;
     rules.shutters[idx] = null;
-    while(rules.shutters.length && (rules.shutters[rules.shutters.length-1] == null)) rules.shutters.pop();
     await putRules(rules);
     toast(t("toast.shutter_removed","Shutter removed"));
     await loadRules();
   }catch(e){
     toast(e.message, false);
+  } finally {
+    shutterActionInFlight = false;
+    if(btn) btn.disabled = false;
   }
 }
 
@@ -1055,6 +1070,10 @@ function renderState(s){
   }
   if(typeof s.uptime_ms === "number"){
     $("uptime").textContent = `${t("uptime.label","Uptime")}: ${formatUptime(s.uptime_ms)}`;
+    if(lastUptimeMs === null || s.uptime_ms !== lastUptimeMs){
+      lastUptimeMs = s.uptime_ms;
+      lastUptimeChangeMs = Date.now();
+    }
   }
   if(s.fw !== undefined){
     const tag = s.fw_tag ? ` (${s.fw_tag})` : "";
@@ -1148,7 +1167,8 @@ function renderState(s){
     `);
   }
   $("inputsView").innerHTML = modules.join("");
-  $("relaysView").innerHTML = "";
+  const relaysView = $("relaysView");
+  if(relaysView) relaysView.innerHTML = "";
 
   renderShutterDash();
 
@@ -1602,6 +1622,7 @@ async function saveRules(){
 async function refreshState(){
   try{
     const s = await getState();
+    lastStateFetchMs = Date.now();
     renderState(s);
   }catch(e){
     $("net").textContent = "NET: ?";
@@ -1609,6 +1630,7 @@ async function refreshState(){
 }
 
 setInterval(refreshState, 600);
+setInterval(updateHeartbeatIndicator, 500);
 async function init(){
   await loadLang(lang);
   applyTheme();

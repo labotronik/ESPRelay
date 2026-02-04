@@ -1200,6 +1200,79 @@
 		(uuid "d30184f1-f5fe-485d-906c-11a45e017999")
 	)
 	(symbol
+		(lib_id "Connector:Screw_Terminal_01x03")
+		(at 190.5 55.88 0)
+		(unit 1)
+		(exclude_from_sim yes)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "32064c76-e194-49b1-9517-6b58e37a686d")
+		(property "Reference" "J13"
+			(at 193.04 54.6099 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "MCVW 1,5/3-ST-3,5 - TS03115B0000G"
+			(at 193.04 57.1499 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 190.5 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 190.5 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Generic screw terminal, single row, 01x03, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 190.5 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "3"
+			(uuid "0492044f-decb-4f77-9776-20ab1081839a")
+		)
+		(pin "2"
+			(uuid "3ca66083-9c01-42cd-affc-835514f23afb")
+		)
+		(pin "1"
+			(uuid "833ea0f7-3f4b-40c7-af7f-30faecb40749")
+		)
+		(instances
+			(project ""
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d/55dce169-37bd-450a-af37-437ce4406a3c"
+					(reference "J13")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Relay:RT314A12")
 		(at 134.62 85.09 0)
 		(unit 1)
@@ -1655,7 +1728,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "Screw_Terminal_01x03"
+		(property "Value" "MCV_1,5_3-G-3.5"
 			(at 160.782 133.858 0)
 			(effects
 				(font
@@ -1727,7 +1800,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "Screw_Terminal_01x03"
+		(property "Value" "MCV_1,5_3-G-3.5"
 			(at 158.242 72.898 0)
 			(effects
 				(font
@@ -1866,7 +1939,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "Screw_Terminal_01x03"
+		(property "Value" "MCV_1,5_3-G-3.5"
 			(at 156.972 43.688 0)
 			(effects
 				(font
@@ -1938,7 +2011,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "Screw_Terminal_01x03"
+		(property "Value" "MCV_1,5_3-G-3.5"
 			(at 159.512 103.378 0)
 			(effects
 				(font

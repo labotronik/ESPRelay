@@ -197,6 +197,9 @@ static AuthConfig authCfg = {"admin", "admin"};
 // ===================== Etat IO =====================
 bool inputs[MAX_INPUTS] = {0};
 bool prevInputs[MAX_INPUTS] = {0};
+bool rawInputs[MAX_INPUTS] = {0};
+uint32_t inputChangeMs[MAX_INPUTS] = {0};
+static const uint32_t INPUT_DEBOUNCE_MS = 20;
 
 bool relays[MAX_RELAYS] = {0};
 bool relayFromSimple[MAX_RELAYS] = {0};
@@ -674,11 +677,25 @@ static void pcaReadInputs() {
     pcaAlive[m] = true;
     pcaLastOkMs[m] = millis();
     for(uint8_t i=0;i<INPUTS_PER_MODULE;i++){
-      inputs[base + i] = (in >> (4+i)) & 0x1; // IO4..IO7
+      rawInputs[base + i] = (in >> (4+i)) & 0x1; // IO4..IO7
     }
   }
 }
 
+static void debounceInputs() {
+  const uint32_t now = millis();
+  for (int i = 0; i < totalInputs; i++) {
+    if (rawInputs[i] != inputs[i]) {
+      if (inputChangeMs[i] == 0) inputChangeMs[i] = now;
+      if (now - inputChangeMs[i] >= INPUT_DEBOUNCE_MS) {
+        inputs[i] = rawInputs[i];
+        inputChangeMs[i] = 0;
+      }
+    } else {
+      inputChangeMs[i] = 0;
+    }
+  }
+}
 static void pcaApplyRelays() {
   for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
     if (!pcaPresent[m]) continue;
@@ -700,8 +717,7 @@ static void pcaApplyRelays() {
 static void addDefaultRelay(JsonArray rel, int i){
   JsonObject r = rel.add<JsonObject>();
   JsonObject expr = r["expr"].to<JsonObject>();
-  expr["op"] = "FOLLOW";
-  expr["in"] = (i+1 <= totalInputs) ? (i+1) : 1;
+  expr["op"] = "NONE";
   r["invert"] = false;
   r["onDelay"] = 0;
   r["offDelay"] = 0;
@@ -1469,7 +1485,7 @@ static bool applyDelays(int i, bool desired, uint32_t onDelay, uint32_t offDelay
   return relayFromSimple[i];
 }
 
-static bool evalExprSimple(int relayIndex, JsonObject expr) {
+static bool evalExprSimple(int relayIndex, JsonObject expr, uint32_t rulePulseMs) {
   const char* op = expr["op"] | "FOLLOW";
 
   if(strcmp(op, "NONE")==0){
@@ -1504,7 +1520,8 @@ static bool evalExprSimple(int relayIndex, JsonObject expr) {
   }
   if(strcmp(op,"PULSE_RISE")==0){
     int in = expr["in"] | 1;
-    uint32_t pulseMs = expr["pulseMs"] | 200;
+    uint32_t pulseMs = expr["pulseMs"] | rulePulseMs;
+    if(pulseMs == 0) pulseMs = 1;
     bool thisRise = false;
     if(in>=1 && in<=totalInputs){
       thisRise = (inputs[in-1] && !prevInputs[in-1]);
@@ -1526,7 +1543,8 @@ static void evalSimpleRules() {
     if(rel && i < (int)rel.size()){
       JsonObject r = rel[i].as<JsonObject>();
       JsonObject expr = r["expr"].as<JsonObject>();
-      desired = evalExprSimple(i, expr);
+      uint32_t pulseMs = r["pulseMs"] | 200;
+      desired = evalExprSimple(i, expr, pulseMs);
 
       bool inv = r["invert"] | false;
       if(inv) desired = !desired;
@@ -2474,6 +2492,7 @@ void setup() {
 void loop() {
   // read inputs early to update module status before serving HTTP
   pcaReadInputs();
+  debounceInputs();
 
   handleHttp();
   updateWifiState();

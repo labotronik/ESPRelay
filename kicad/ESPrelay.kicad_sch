@@ -8878,8 +8878,8 @@
 				)
 			)
 		)
-		(property "Value" "POWER_INPUT"
-			(at 19.812 172.466 0)
+		(property "Value" "MCV_1,5_2-G-3.5"
+			(at 25.146 178.054 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -12800,7 +12800,6 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "d6379853-67e1-4c15-94de-5658cea175ef")
 		(property "Reference" "#FLG01"
 			(at 34.29 169.545 0)
@@ -12812,7 +12811,7 @@
 			)
 		)
 		(property "Value" "PWR_FLAG"
-			(at 34.29 166.37 0)
+			(at 21.844 171.958 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13730,6 +13729,74 @@
 			(project ""
 				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
 					(reference "J3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:Screw_Terminal_01x02")
+		(at 22.86 163.83 180)
+		(unit 1)
+		(exclude_from_sim yes)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "f34ae4f3-2023-4e90-8174-6750e42dd40f")
+		(property "Reference" "J14"
+			(at 22.86 154.94 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "TS02115B0000G"
+			(at 22.86 157.48 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 22.86 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 22.86 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Generic screw terminal, single row, 01x02, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 22.86 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "8ea4a7b6-96a8-4170-b5b1-7b568013373d")
+		)
+		(pin "2"
+			(uuid "852bfdd1-29f0-488e-a20f-5e6a88ab5434")
+		)
+		(instances
+			(project ""
+				(path "/69ed8f4f-6a33-4210-b2ac-8a5f3a02835d"
+					(reference "J14")
 					(unit 1)
 				)
 			)
