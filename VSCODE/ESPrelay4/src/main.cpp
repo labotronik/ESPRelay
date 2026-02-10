@@ -27,6 +27,7 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <WiFi.h>
+#include <DNSServer.h>
 #include <Update.h>
 #include <mbedtls/sha256.h>
 #include <LittleFS.h>
@@ -76,6 +77,7 @@ public:
 
 EthernetServerCompat server(80);
 static WiFiServer wifiServer(80);
+static DNSServer wifiDns;
 
 // ===================== Réseau (à adapter) ======================
 byte mac[6] = { 0,0,0,0,0,0 };
@@ -348,6 +350,7 @@ static void startWifiAp(){
   const bool ok = WiFi.softAP(wifiCfg.ssid.c_str(), wifiCfg.pass.c_str());
   if(ok){
     wifiServer.begin();
+    wifiDns.start(53, "*", WiFi.softAPIP());
     wifiApOn = true;
     Serial.printf("[WIFI] AP ON SSID=%s PASS=%s IP=%s\n", wifiCfg.ssid.c_str(), wifiCfg.pass.c_str(), WiFi.softAPIP().toString().c_str());
   } else {
@@ -358,6 +361,7 @@ static void startWifiAp(){
 
 static void stopWifiAp(){
   if(!wifiApOn) return;
+  wifiDns.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
   wifiApOn = false;
@@ -2402,8 +2406,27 @@ static void handleHttpClient(Client& client){
       }
     }
   }
+  else if(method=="GET" && wifiApOn && (
+      path=="/generate_204" || path=="/gen_204" ||
+      path=="/hotspot-detect.html" || path=="/success.txt" ||
+      path=="/ncsi.txt" || path=="/connecttest.txt"
+    )){
+    client.println("HTTP/1.1 302 Found");
+    client.print("Location: http://"); client.print(WiFi.softAPIP().toString()); client.println("/");
+    client.println("Cache-Control: no-cache");
+    client.println("Connection: close");
+    client.println();
+  }
   else{
-    sendText(client, "not found\n", "text/plain", 404);
+    if(wifiApOn && method=="GET" && !path.startsWith("/api") && path != "/i18n_en.json" && path != "/i18n_fr.json"){
+      client.println("HTTP/1.1 302 Found");
+      client.print("Location: http://"); client.print(WiFi.softAPIP().toString()); client.println("/");
+      client.println("Cache-Control: no-cache");
+      client.println("Connection: close");
+      client.println();
+    } else {
+      sendText(client, "not found\n", "text/plain", 404);
+    }
   }
 
   delay(1);
@@ -2415,6 +2438,7 @@ static void handleHttp(){
   if(ethClient) handleHttpClient(ethClient);
 
   if(wifiApOn){
+    wifiDns.processNextRequest();
     WiFiClient wifiClient = wifiServer.available();
     if(wifiClient) handleHttpClient(wifiClient);
   }
