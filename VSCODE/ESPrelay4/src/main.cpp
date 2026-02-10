@@ -89,9 +89,13 @@ static uint32_t bleLastNotifyMs = 0;
 static String bleServiceUuid;
 static String bleStateCharUuid;
 static String bleStateReadCharUuid;
+static bool bleInitialized = false;
+static bool bleEnabled = true;
 
 static void buildStateJson(String &out);
 static void buildStateJsonBle(String &out);
+static bool saveBleCfg();
+static bool loadBleCfg();
 
 static String macHex12Upper(){
   uint64_t mac64 = ESP.getEfuseMac();
@@ -237,6 +241,10 @@ bool prevInputs[MAX_INPUTS] = {0};
 bool rawInputs[MAX_INPUTS] = {0};
 uint32_t inputChangeMs[MAX_INPUTS] = {0};
 static const uint32_t INPUT_DEBOUNCE_MS = 20;
+bool virtualInputs[MAX_INPUTS] = {0};
+bool lastVirtualPub[MAX_INPUTS] = {0};
+bool combinedInputs[MAX_INPUTS] = {0};
+bool prevCombinedInputs[MAX_INPUTS] = {0};
 
 bool relays[MAX_RELAYS] = {0};
 bool relayFromSimple[MAX_RELAYS] = {0};
@@ -253,6 +261,10 @@ uint8_t totalInputs = 4;
 
 // Overrides : -1 auto, 0 force off, 1 force on (uniquement pour relais NON réservés)
 int8_t overrideRelay[MAX_RELAYS];
+String lastRulePub[MAX_RELAYS];
+String lastIpPub = "";
+bool lastWifiPub = false;
+bool lastBlePub = false;
 
 // Mémoire toggle + pulse pour règles simples
 bool toggleState[MAX_RELAYS] = {0};
@@ -416,6 +428,40 @@ static void applyWifiCfg(){
   updateWifiState(true);
 }
 
+// BLE config (LittleFS)
+static void bleCfgToJson(String &out){
+  static JsonDocument doc;
+  doc.clear();
+  doc["enabled"] = bleEnabled ? 1 : 0;
+  serializeJsonPretty(doc, out);
+}
+
+static bool saveBleCfg(){
+  String out;
+  bleCfgToJson(out);
+  return writeFile("/ble.json", out);
+}
+
+static bool loadBleCfg(){
+  String s = readFile("/ble.json");
+  if(s.length() == 0){
+    bleEnabled = true;
+    saveBleCfg();
+    Serial.println("[BLE] created default /ble.json");
+    return true;
+  }
+  static JsonDocument doc;
+  doc.clear();
+  auto err = deserializeJson(doc, s);
+  if(err){
+    Serial.printf("[BLE] JSON parse error -> keep default (%s)\n", err.c_str());
+    bleEnabled = true;
+    return false;
+  }
+  bleEnabled = (doc["enabled"] | 1) ? true : false;
+  return true;
+}
+
 class BleServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* s) override {
     bleClientConnected = true;
@@ -427,6 +473,7 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
 };
 
 static void initBle(){
+  if(!bleEnabled) return;
   String name = defaultWifiSsid(); // ESPRelay4-XXXXXX
   buildBleUuids();
   NimBLEDevice::init(name.c_str());
@@ -449,10 +496,12 @@ static void initBle(){
   adv->addServiceUUID(bleServiceUuid.c_str());
   adv->setScanResponse(true);
   adv->start();
+  bleInitialized = true;
   Serial.printf("[BLE] advertising as %s svc=%s\n", name.c_str(), bleServiceUuid.c_str());
 }
 
 static void bleTick(){
+  if(!bleEnabled) return;
   if(!bleClientConnected || !bleStateChar) return;
   uint32_t now = millis();
   if(now - bleLastNotifyMs < 1000) return;
@@ -483,6 +532,25 @@ static void bleTick(){
     bleStateChar->setValue((uint8_t*)framed.data() + offset, n);
     bleStateChar->notify();
     offset += n;
+  }
+}
+
+static void setBleEnabled(bool en){
+  if(en == bleEnabled) return;
+  bleEnabled = en;
+  if(!bleInitialized){
+    if(bleEnabled) initBle();
+    return;
+  }
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  if(bleEnabled){
+    if(adv) adv->start();
+  } else {
+    if(adv) adv->stop();
+    if(bleClientConnected && bleServer){
+      bleServer->disconnect(0);
+    }
+    bleClientConnected = false;
   }
 }
 
@@ -561,7 +629,7 @@ static void logFactoryPinState(){
 
 static void doFactoryReset(){
   Serial.println("[FACTORY] button held 10s -> reset config");
-  const char* files[] = {"/net.json", "/mqtt.json", "/rules.json", "/auth.json", "/wifi.json"};
+  const char* files[] = {"/net.json", "/mqtt.json", "/rules.json", "/auth.json", "/wifi.json", "/ble.json"};
   for(size_t i=0;i<sizeof(files)/sizeof(files[0]);i++){
     if(LittleFS.exists(files[i])){
       LittleFS.remove(files[i]);
@@ -1021,6 +1089,49 @@ static String tempAddrToString(const DeviceAddress &a){
   return String(buf);
 }
 
+static String ruleSummaryShort(int relayIndex){
+  JsonArray rel = rulesDoc["relays"].as<JsonArray>();
+  if(!rel || relayIndex < 0 || relayIndex >= (int)rel.size()) return "NONE";
+  JsonObject r = rel[relayIndex].as<JsonObject>();
+  if(!r) return "NONE";
+  JsonObject expr = r["expr"].as<JsonObject>();
+  const char* op = (expr && !expr["op"].isNull()) ? (const char*)expr["op"] : "NONE";
+  bool inv = r["invert"] | false;
+  String out = "";
+  if(inv) out += "INV ";
+
+  if(strcmp(op,"NONE")==0){
+    out += "NONE";
+    return out;
+  }
+  if(strcmp(op,"FOLLOW")==0 || strcmp(op,"TOGGLE_RISE")==0 || strcmp(op,"PULSE_RISE")==0){
+    int in = expr["in"] | 1;
+    if(strcmp(op,"FOLLOW")==0) out += "FOLLOW E" + String(in);
+    else if(strcmp(op,"TOGGLE_RISE")==0) out += "TOGGLE E" + String(in);
+    else {
+      uint32_t pulseMs = r["pulseMs"] | 200;
+      out += "PULSE E" + String(in) + " " + String(pulseMs) + "ms";
+    }
+    return out;
+  }
+  if(strcmp(op,"AND")==0 || strcmp(op,"OR")==0 || strcmp(op,"XOR")==0){
+    out += String(op) + " ";
+    JsonArray ins = expr["ins"].as<JsonArray>();
+    if(ins && ins.size()>0){
+      for(size_t i=0;i<ins.size();i++){
+        int in = (int)ins[i];
+        if(i>0) out += ",";
+        out += "E" + String(in);
+      }
+    } else {
+      out += "E1";
+    }
+    return out;
+  }
+  out += String(op);
+  return out;
+}
+
 static void mqttPublishDiscovery() {
   if (!mqttClient.connected()) return;
   String base = mqttBaseTopic();
@@ -1050,7 +1161,103 @@ static void mqttPublishDiscovery() {
     String topic = mqttCfg.discoveryPrefix + "/switch/" + uid + "/config";
     String out; serializeJson(doc, out);
     mqttPublish(topic, out, true);
+
+    // Auto button to return relay to AUTO mode
+    doc.clear();
+    doc["name"] = "Relay " + String(i+1) + " AUTO";
+    doc["uniq_id"] = uid + "_auto";
+    doc["cmd_t"] = base + "/relay/" + String(i+1) + "/auto";
+    doc["pl_press"] = "AUTO";
+    doc["avty_t"] = avail;
+    doc["pl_avail"] = "online";
+    doc["pl_not_avail"] = "offline";
+    JsonObject dev2 = doc["dev"].to<JsonObject>();
+    dev2["ids"] = id;
+    dev2["name"] = node;
+    dev2["mdl"] = "ESPRelay4";
+    dev2["mf"] = "ESPRelay4";
+    topic = mqttCfg.discoveryPrefix + "/button/" + uid + "_auto/config";
+    serializeJson(doc, out);
+    mqttPublish(topic, out, true);
+
+    // Rule summary sensor
+    doc.clear();
+    String rid = id + "_rule_" + String(i+1);
+    doc["name"] = "Rule R" + String(i+1);
+    doc["uniq_id"] = rid;
+    doc["stat_t"] = base + "/rule/relay/" + String(i+1);
+    doc["avty_t"] = avail;
+    doc["pl_avail"] = "online";
+    doc["pl_not_avail"] = "offline";
+    JsonObject devr = doc["dev"].to<JsonObject>();
+    devr["ids"] = id;
+    devr["name"] = node;
+    devr["mdl"] = "ESPRelay4";
+    devr["mf"] = "ESPRelay4";
+    topic = mqttCfg.discoveryPrefix + "/sensor/" + rid + "/config";
+    serializeJson(doc, out);
+    mqttPublish(topic, out, true);
   }
+
+  // IP sensor
+  doc.clear();
+  String ipId = id + "_ip";
+  doc["name"] = "IP";
+  doc["uniq_id"] = ipId;
+  doc["stat_t"] = base + "/net/ip";
+  doc["avty_t"] = avail;
+  doc["pl_avail"] = "online";
+  doc["pl_not_avail"] = "offline";
+  JsonObject devip = doc["dev"].to<JsonObject>();
+  devip["ids"] = id;
+  devip["name"] = node;
+  devip["mdl"] = "ESPRelay4";
+  devip["mf"] = "ESPRelay4";
+  String ipTopic = mqttCfg.discoveryPrefix + "/sensor/" + ipId + "/config";
+  String out; serializeJson(doc, out);
+  mqttPublish(ipTopic, out, true);
+
+  // WiFi AP enable switch
+  doc.clear();
+  String wId = id + "_wifi_ap";
+  doc["name"] = "WiFi AP";
+  doc["uniq_id"] = wId;
+  doc["stat_t"] = base + "/wifi/ap/state";
+  doc["cmd_t"] = base + "/wifi/ap/set";
+  doc["pl_on"] = "ON";
+  doc["pl_off"] = "OFF";
+  doc["avty_t"] = avail;
+  doc["pl_avail"] = "online";
+  doc["pl_not_avail"] = "offline";
+  JsonObject devw = doc["dev"].to<JsonObject>();
+  devw["ids"] = id;
+  devw["name"] = node;
+  devw["mdl"] = "ESPRelay4";
+  devw["mf"] = "ESPRelay4";
+  String wTopic = mqttCfg.discoveryPrefix + "/switch/" + wId + "/config";
+  serializeJson(doc, out);
+  mqttPublish(wTopic, out, true);
+
+  // BLE enable switch
+  doc.clear();
+  String bId = id + "_ble";
+  doc["name"] = "BLE";
+  doc["uniq_id"] = bId;
+  doc["stat_t"] = base + "/ble/state";
+  doc["cmd_t"] = base + "/ble/set";
+  doc["pl_on"] = "ON";
+  doc["pl_off"] = "OFF";
+  doc["avty_t"] = avail;
+  doc["pl_avail"] = "online";
+  doc["pl_not_avail"] = "offline";
+  JsonObject devb = doc["dev"].to<JsonObject>();
+  devb["ids"] = id;
+  devb["name"] = node;
+  devb["mdl"] = "ESPRelay4";
+  devb["mf"] = "ESPRelay4";
+  String bTopic = mqttCfg.discoveryPrefix + "/switch/" + bId + "/config";
+  serializeJson(doc, out);
+  mqttPublish(bTopic, out, true);
 
   for (int i = 0; i < totalInputs; i++) {
     doc.clear();
@@ -1069,6 +1276,29 @@ static void mqttPublishDiscovery() {
     dev["mdl"] = "ESPRelay4";
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/binary_sensor/" + uid + "/config";
+    String out; serializeJson(doc, out);
+    mqttPublish(topic, out, true);
+  }
+
+  // Virtual inputs (MQTT-driven) as switches
+  for (int i = 0; i < totalInputs; i++) {
+    doc.clear();
+    String uid = id + "_vin_" + String(i+1);
+    doc["name"] = "VInput " + String(i+1);
+    doc["uniq_id"] = uid;
+    doc["stat_t"] = base + "/vin/" + String(i+1) + "/state";
+    doc["cmd_t"] = base + "/vin/" + String(i+1) + "/set";
+    doc["pl_on"] = "ON";
+    doc["pl_off"] = "OFF";
+    doc["avty_t"] = avail;
+    doc["pl_avail"] = "online";
+    doc["pl_not_avail"] = "offline";
+    JsonObject dev = doc["dev"].to<JsonObject>();
+    dev["ids"] = id;
+    dev["name"] = node;
+    dev["mdl"] = "ESPRelay4";
+    dev["mf"] = "ESPRelay4";
+    String topic = mqttCfg.discoveryPrefix + "/switch/" + uid + "/config";
     String out; serializeJson(doc, out);
     mqttPublish(topic, out, true);
   }
@@ -1172,13 +1402,29 @@ static void mqttPublishAllState() {
   if (!mqttClient.connected()) return;
   String base = mqttBaseTopic();
   mqttPublish(base + "/status", "online", true);
+  String ip = Ethernet.localIP().toString();
+  mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
+  lastIpPub = ip;
+  mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
+  lastWifiPub = wifiCfg.enabled;
+  mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
+  lastBlePub = bleEnabled;
   for (int i = 0; i < totalRelays; i++) {
     mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
     lastRelaysPub[i] = relays[i];
   }
+  for (int i = 0; i < totalRelays; i++) {
+    String rs = ruleSummaryShort(i);
+    mqttPublish(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
+    lastRulePub[i] = rs;
+  }
   for (int i = 0; i < totalInputs; i++) {
     mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
     lastInputsPub[i] = inputs[i];
+  }
+  for (int i = 0; i < totalInputs; i++) {
+    mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
+    lastVirtualPub[i] = virtualInputs[i];
   }
   for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
@@ -1211,7 +1457,36 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.printf("[MQTT] RX topic=%s payload=%s\n", t.c_str(), p.c_str());
 
   String base = mqttBaseTopic();
-  if (t.startsWith(base + "/relay/") && t.endsWith("/set")) {
+  if (t.startsWith(base + "/relay/") && t.endsWith("/auto")) {
+    int idx = t.substring((base + "/relay/").length()).toInt();
+    if (idx >= 1 && idx <= totalRelays) {
+      int i = idx - 1;
+      if (!reservedByShutter[i]) {
+        overrideRelay[i] = -1;
+      }
+    }
+  }
+  else if (t == base + "/wifi/ap/set") {
+    if (p == "ON") wifiCfg.enabled = true;
+    else if (p == "OFF") wifiCfg.enabled = false;
+    saveWifiCfg();
+    applyWifiCfg();
+  }
+  else if (t == base + "/ble/set") {
+    if (p == "ON") setBleEnabled(true);
+    else if (p == "OFF") setBleEnabled(false);
+    saveBleCfg();
+  }
+  else if (t.startsWith(base + "/vin/") && t.endsWith("/set")) {
+    int idx = t.substring((base + "/vin/").length()).toInt();
+    if (idx >= 1 && idx <= totalInputs) {
+      int i = idx - 1;
+      if (p == "ON") virtualInputs[i] = true;
+      else if (p == "OFF") virtualInputs[i] = false;
+      else if (p == "TOGGLE") virtualInputs[i] = !virtualInputs[i];
+    }
+  }
+  else if (t.startsWith(base + "/relay/") && t.endsWith("/set")) {
     int idx = t.substring((base + "/relay/").length()).toInt();
     if (idx >= 1 && idx <= totalRelays) {
       int i = idx - 1;
@@ -1243,6 +1518,12 @@ static void mqttSubscribeTopics() {
   String base = mqttBaseTopic();
   for (int i = 1; i <= totalRelays; i++) {
     mqttClient.subscribe((base + "/relay/" + String(i) + "/set").c_str());
+    mqttClient.subscribe((base + "/relay/" + String(i) + "/auto").c_str());
+  }
+  mqttClient.subscribe((base + "/wifi/ap/set").c_str());
+  mqttClient.subscribe((base + "/ble/set").c_str());
+  for (int i = 1; i <= totalInputs; i++) {
+    mqttClient.subscribe((base + "/vin/" + String(i) + "/set").c_str());
   }
   for (int s = 1; s <= shuttersLimit(); s++) {
     mqttClient.subscribe((base + "/shutter/" + String(s) + "/set").c_str());
@@ -1288,10 +1569,41 @@ static void mqttLoop() {
   }
 
   String base = mqttBaseTopic();
+  String ip = Ethernet.localIP().toString();
+  if(ip != lastIpPub){
+    mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
+    lastIpPub = ip;
+  }
+  if(wifiCfg.enabled != lastWifiPub){
+    mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
+    lastWifiPub = wifiCfg.enabled;
+  }
+  if(bleEnabled != lastBlePub){
+    mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
+    lastBlePub = bleEnabled;
+  }
+  static uint32_t lastRuleCheckMs = 0;
+  const uint32_t now = millis();
+  if(now - lastRuleCheckMs > 2000){
+    lastRuleCheckMs = now;
+    for (int i = 0; i < totalRelays; i++) {
+      String rs = ruleSummaryShort(i);
+      if(rs != lastRulePub[i]){
+        mqttPublish(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
+        lastRulePub[i] = rs;
+      }
+    }
+  }
   for (int i = 0; i < totalInputs; i++) {
     if (inputs[i] != lastInputsPub[i]) {
       mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
       lastInputsPub[i] = inputs[i];
+    }
+  }
+  for (int i = 0; i < totalInputs; i++) {
+    if (virtualInputs[i] != lastVirtualPub[i]) {
+      mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
+      lastVirtualPub[i] = virtualInputs[i];
     }
   }
   for (int i = 0; i < totalRelays; i++) {
@@ -1426,7 +1738,7 @@ static bool parseShutterFromRules(JsonArray shutters, String &errMsg) {
 
 static bool getInputN(int n){ // n = 1..totalInputs
   if(n < 1 || n > totalInputs) return false;
-  return inputs[n-1];
+  return combinedInputs[n-1];
 }
 
 static void shutterSetOutputs(int s, ShutterMove m) {
@@ -1622,7 +1934,7 @@ static bool evalExprSimple(int relayIndex, JsonObject expr, uint32_t rulePulseMs
     int in = expr["in"] | 1;
     bool thisRise = false;
     if(in>=1 && in<=totalInputs){
-      thisRise = (inputs[in-1] && !prevInputs[in-1]);
+      thisRise = (combinedInputs[in-1] && !prevCombinedInputs[in-1]);
     }
     if(thisRise) toggleState[relayIndex] = !toggleState[relayIndex];
     return toggleState[relayIndex];
@@ -1633,7 +1945,7 @@ static bool evalExprSimple(int relayIndex, JsonObject expr, uint32_t rulePulseMs
     if(pulseMs == 0) pulseMs = 1;
     bool thisRise = false;
     if(in>=1 && in<=totalInputs){
-      thisRise = (inputs[in-1] && !prevInputs[in-1]);
+      thisRise = (combinedInputs[in-1] && !prevCombinedInputs[in-1]);
     }
     if(thisRise){
       pulseUntilMs[relayIndex] = millis() + pulseMs;
@@ -2650,6 +2962,7 @@ void setup() {
   // Ethernet
   loadNetCfg();
   loadWifiCfg();
+  loadBleCfg();
   buildEthernetMac();
   applyNetCfg();
   ethernetPrintInfo();
@@ -2668,6 +2981,11 @@ void loop() {
   // read inputs early to update module status before serving HTTP
   pcaReadInputs();
   debounceInputs();
+
+  // combine physical + virtual inputs for rules/edges
+  for(int i=0;i<totalInputs;i++){
+    combinedInputs[i] = inputs[i] || virtualInputs[i];
+  }
 
   handleHttp();
   updateWifiState();
@@ -2717,7 +3035,10 @@ void loop() {
 
 
   // update prev inputs for edge-based rules/toggle/pulse
-  for(int k=0;k<totalInputs;k++) prevInputs[k] = inputs[k];
+  for(int k=0;k<totalInputs;k++){
+    prevInputs[k] = inputs[k];
+    prevCombinedInputs[k] = combinedInputs[k];
+  }
 
   // 1Hz log
   static uint32_t t0 = 0;
