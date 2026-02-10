@@ -13,7 +13,6 @@
   "dashboard.shutters": "🪟 Volets roulants",
   "programming.load_rules": "Charger règles",
   "programming.save_rules": "Sauver règles",
-  "programming.flash_note": "Règles sauvegardées en flash.",
   "programming.simple_rules_title": "Règles simples (R1..R4)",
   "programming.simple_rules_desc": "FOLLOW / AND / OR / XOR / TOGGLE_RISE / PULSE_RISE + invert + délais.",
   "json.full_view": "Vue du JSON complet",

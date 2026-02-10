@@ -28,6 +28,7 @@
 #include <Ethernet.h>
 #include <WiFi.h>
 #include <DNSServer.h>
+#include <NimBLEDevice.h>
 #include <Update.h>
 #include <mbedtls/sha256.h>
 #include <LittleFS.h>
@@ -78,6 +79,40 @@ public:
 EthernetServerCompat server(80);
 static WiFiServer wifiServer(80);
 static DNSServer wifiDns;
+
+// BLE (read-only state JSON)
+static NimBLEServer* bleServer = nullptr;
+static NimBLECharacteristic* bleStateChar = nullptr;
+static NimBLECharacteristic* bleStateReadChar = nullptr;
+static bool bleClientConnected = false;
+static uint32_t bleLastNotifyMs = 0;
+static String bleServiceUuid;
+static String bleStateCharUuid;
+static String bleStateReadCharUuid;
+
+static void buildStateJson(String &out);
+static void buildStateJsonBle(String &out);
+
+static String macHex12Upper(){
+  uint64_t mac64 = ESP.getEfuseMac();
+  uint8_t b[6];
+  b[0] = (mac64 >> 40) & 0xFF;
+  b[1] = (mac64 >> 32) & 0xFF;
+  b[2] = (mac64 >> 24) & 0xFF;
+  b[3] = (mac64 >> 16) & 0xFF;
+  b[4] = (mac64 >> 8) & 0xFF;
+  b[5] = (mac64 >> 0) & 0xFF;
+  char buf[13];
+  snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X", b[0], b[1], b[2], b[3], b[4], b[5]);
+  return String(buf);
+}
+
+static void buildBleUuids(){
+  String mac = macHex12Upper();
+  bleServiceUuid = "6E400001-B5A3-F393-E0A9-" + mac;
+  bleStateCharUuid = "6E400003-B5A3-F393-E0A9-" + mac;
+  bleStateReadCharUuid = "6E400004-B5A3-F393-E0A9-" + mac;
+}
 
 // ===================== Réseau (à adapter) ======================
 byte mac[6] = { 0,0,0,0,0,0 };
@@ -379,6 +414,76 @@ static void updateWifiState(bool force=false){
 
 static void applyWifiCfg(){
   updateWifiState(true);
+}
+
+class BleServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* s) override {
+    bleClientConnected = true;
+  }
+  void onDisconnect(NimBLEServer* s) override {
+    bleClientConnected = false;
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+static void initBle(){
+  String name = defaultWifiSsid(); // ESPRelay4-XXXXXX
+  buildBleUuids();
+  NimBLEDevice::init(name.c_str());
+  NimBLEDevice::setMTU(185);
+  bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new BleServerCallbacks());
+  NimBLEService* svc = bleServer->createService(bleServiceUuid.c_str());
+  bleStateChar = svc->createCharacteristic(
+    bleStateCharUuid.c_str(),
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+  );
+  bleStateReadChar = svc->createCharacteristic(
+    bleStateReadCharUuid.c_str(),
+    NIMBLE_PROPERTY::READ
+  );
+  bleStateChar->setValue("{}");
+  bleStateReadChar->setValue("{}");
+  svc->start();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(bleServiceUuid.c_str());
+  adv->setScanResponse(true);
+  adv->start();
+  Serial.printf("[BLE] advertising as %s svc=%s\n", name.c_str(), bleServiceUuid.c_str());
+}
+
+static void bleTick(){
+  if(!bleClientConnected || !bleStateChar) return;
+  uint32_t now = millis();
+  if(now - bleLastNotifyMs < 1000) return;
+  bleLastNotifyMs = now;
+  String out;
+  buildStateJsonBle(out);
+  if(bleStateReadChar){
+    bleStateReadChar->setValue((uint8_t*)out.c_str(), out.length());
+  }
+  if(out.length() > 480){
+    out = "{\"error\":\"state_too_large\"}";
+  }
+  // Frame: 0x1E 0x1E + payload + 0x1F
+  const uint8_t start[2] = {0x1E, 0x1E};
+  const uint8_t end = 0x1F;
+
+  const size_t maxChunk = 160; // safe for BLE notifications
+  std::string framed;
+  framed.reserve(out.length() + 3);
+  framed.append((const char*)start, 2);
+  framed.append(out.c_str(), out.length());
+  framed.push_back((char)end);
+
+  size_t offset = 0;
+  while(offset < framed.size()){
+    size_t n = framed.size() - offset;
+    if(n > maxChunk) n = maxChunk;
+    bleStateChar->setValue((uint8_t*)framed.data() + offset, n);
+    bleStateChar->notify();
+    offset += n;
+  }
 }
 
 // Auth config (LittleFS)
@@ -1682,7 +1787,7 @@ static void sendText(Client& c, const String& body, const char* ctype, int code=
   c.print(body);
 }
 
-static void sendJsonState(Client& c){
+static void buildStateJson(String &out){
   static JsonDocument doc;
   doc.clear();
   JsonArray inA = doc["inputs"].to<JsonArray>();
@@ -1762,8 +1867,53 @@ static void sendJsonState(Client& c){
   if(strlen(FW_TAG) > 0) doc["fw_tag"] = FW_TAG;
   doc["uptime_ms"] = (uint32_t)millis();
 
-  String out; serializeJson(doc, out);
+  serializeJson(doc, out);
+}
+
+static void sendJsonState(Client& c){
+  String out;
+  buildStateJson(out);
   sendText(c, out, "application/json");
+}
+
+static void buildStateJsonBle(String &out){
+  static StaticJsonDocument<1024> doc;
+  doc.clear();
+  JsonArray inA = doc["inputs"].to<JsonArray>();
+  JsonArray reA = doc["relays"].to<JsonArray>();
+  JsonArray ovA = doc["override"].to<JsonArray>();
+  JsonArray modA = doc["modules_status"].to<JsonArray>();
+  JsonArray modF = doc["modules_fail"].to<JsonArray>();
+
+  for(int i=0;i<totalInputs;i++){
+    inA.add(inputs[i] ? 1 : 0);
+  }
+  for(int i=0;i<totalRelays;i++){
+    reA.add(relays[i] ? 1 : 0);
+    ovA.add(overrideRelay[i]);
+  }
+  for(int m=0; m<pcaCount; m++){
+    const bool ok = (pcaLastOkMs[m] != 0) && (millis() - pcaLastOkMs[m] < 5000);
+    modA.add(ok ? 1 : 0);
+    modF.add(pcaFailCount[m]);
+  }
+
+  JsonObject eth = doc["eth"].to<JsonObject>();
+  eth["link"] = (Ethernet.linkStatus()==LinkON) ? 1 : 0;
+  eth["ip"] = Ethernet.localIP().toString();
+
+  doc["modules"] = pcaCount;
+  doc["relays_per"] = RELAYS_PER_MODULE;
+  doc["inputs_per"] = INPUTS_PER_MODULE;
+  doc["total_relays"] = totalRelays;
+  doc["total_inputs"] = totalInputs;
+  doc["uptime_ms"] = (uint32_t)millis();
+  doc["fw"] = FW_VERSION;
+  if(strlen(FW_TAG) > 0) doc["fw_tag"] = FW_TAG;
+
+  if(serializeJson(doc, out) == 0){
+    out = "{}";
+  }
 }
 
 static void sendJsonNetCfg(Client& c){
@@ -2504,6 +2654,7 @@ void setup() {
   applyNetCfg();
   ethernetPrintInfo();
   applyWifiCfg();
+  initBle();
 
   // MQTT
   loadMqttCfg();
@@ -2521,6 +2672,7 @@ void loop() {
   handleHttp();
   updateWifiState();
   heartbeatTick();
+  bleTick();
 
   // tick shutter BEFORE computing simple rules, so it can use prevInputs if needed
   shutterTick();

@@ -13,7 +13,6 @@
   "dashboard.shutters": "🪟 Shutters",
   "programming.load_rules": "Load rules",
   "programming.save_rules": "Save rules",
-  "programming.flash_note": "Rules saved in flash.",
   "programming.simple_rules_title": "Simple rules (R1..R4)",
   "programming.simple_rules_desc": "FOLLOW / AND / OR / XOR / TOGGLE_RISE / PULSE_RISE + invert + delays.",
   "json.full_view": "Full JSON view",
