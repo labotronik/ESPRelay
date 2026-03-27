@@ -34,15 +34,53 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
+#include <cstring>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <DHT.h>
+
+#ifndef RXD0
+#define RXD0 44
+#endif
+#ifndef TXD0
+#define TXD0 43
+#endif
+
+#ifndef TINY_GSM_MODEM_SIM7600
+#define TINY_GSM_MODEM_SIM7600
+#endif
+#ifndef TINY_GSM_RX_BUFFER
+#define TINY_GSM_RX_BUFFER 1024
+#endif
+#include <TinyGsmClient.h>
 
 // ===================== A ADAPTER A TON PCB =====================
 static const uint8_t PIN_LED = 40;
 static const uint8_t PIN_ONEWIRE = 1;  // DS18B20 (IO1)
 static const uint8_t PIN_DHT = 2;      // DHT22 (IO2)
 static const uint8_t PIN_FACTORY = 0;  // IO0 factory reset button (hold 10s at boot)
+static const int PIN_MODEM_EN = 3;     // Modem power-enable (PEN)
+static const int PIN_MODEM_RX = RXD0;  // ESP RXD0 <- A7670 TX
+static const int PIN_MODEM_TX = TXD0;  // ESP TXD0 -> A7670 RX
+static const uint32_t MODEM_UART_BAUD = 115200;
+static const int MODEM_RX = PIN_MODEM_RX;
+static const int MODEM_TX = PIN_MODEM_TX;
+// Optional A7670 control pins (-1 = not connected on your PCB)
+static const int PIN_MODEM_PWRKEY = 15;  // Active LOW pulse to power on/off
+static const int PIN_MODEM_STATUS = -1;  // High when modem is on (if wired)
+static const int PIN_MODEM_NET = 16;     // NETLIGHT output from modem
+// A7670 HW design guide: PWRKEY low pulse >=50 ms, UART ready ~11.2 s
+static const uint32_t MODEM_PWRKEY_ON_PULSE_MS = 80;
+static const uint32_t MODEM_BOOT_WAIT_MS = 12000;
+
+// GPRS credentials (used as defaults if MQTT GSM fields are empty)
+static const char GPRS_DEFAULT_APN[] = "iot.1nce.net";
+static const char GPRS_DEFAULT_USER[] = "";
+static const char GPRS_DEFAULT_PASS[] = "";
+// SIM card PIN (leave empty if not used)
+static const char SIM_PIN[] = "";
+// MQTT keepalive in seconds (default 30 min for low GSM traffic)
+static const uint16_t MQTT_KEEPALIVE_SECONDS = 1800;
 
 // I2C (PCA9538)
 static const int I2C_SDA = 8;     
@@ -170,34 +208,80 @@ static void buildEthernetMac() {
 // ===================== MQTT ======================
 struct MqttConfig {
   bool enabled;
+  String transport;
   String host;
   uint16_t port;
   String user;
   String pass;
+  String gsmMqttHost;
+  uint16_t gsmMqttPort;
+  String gsmMqttUser;
+  String gsmMqttPass;
   String clientId;
   String base;
   String discoveryPrefix;
   bool retain;
+  String apn;
+  String gsmUser;
+  String gsmPass;
 };
 
 static MqttConfig mqttCfg = {
-  false,
-  String("192.168.1.43"),
-  1883,
-  String(""),
-  String(""),
-  String("ESPRelay4"),
-  String("esprelay4"),
-  String("homeassistant"),
-  true
+  true,                    // enabled: active/desactive MQTT
+  String("ethernet"),      // transport: ethernet | gsm | auto
+  String("192.168.1.43"),  // host: broker MQTT principal (Ethernet/auto)
+  1883,                    // port: port du broker principal
+  String(""),              // user: identifiant MQTT principal
+  String(""),              // pass: mot de passe MQTT principal
+  String("82.64.24.196"),  // gsmMqttHost: broker dedie GSM (optionnel)
+  1883,                    // gsmMqttPort: port broker dedie GSM
+  String(""),              // gsmMqttUser: identifiant MQTT dedie GSM
+  String(""),              // gsmMqttPass: mot de passe MQTT dedie GSM
+  String("ESPRelay4"),     // clientId: identifiant client MQTT
+  String("esprelay4"),     // base: topic racine
+  String("homeassistant"), // discoveryPrefix: prefix Home Assistant discovery
+  true,                    // retain: publier les etats avec le flag retain
+  String(GPRS_DEFAULT_APN),   // apn: APN data pour connexion GSM
+  String(GPRS_DEFAULT_USER),  // gsmUser: user APN (GPRS)
+  String(GPRS_DEFAULT_PASS)   // gsmPass: mot de passe APN (GPRS)
 };
 
 static EthernetClient mqttEth;
+static HardwareSerial& SerialAT = Serial1;
+static TinyGsm modem(SerialAT);
+static TinyGsmClient mqttGsm(modem);
 static PubSubClient mqttClient(mqttEth);
 static uint32_t mqttLastConnectMs = 0;
+static uint32_t mqttLastEthFailMs = 0;
+static int mqttLastEthFailRc = 0;
+static bool mqttEthAuthBlocked = false;
 static bool mqttAnnounced = false;
+static bool mqttDisabledWarned = false;
+static bool modemSerialReady = false;
+static bool modemReady = false;
+static bool modemPowerKickDone = false;
+static bool simPinChecked = false;
+static bool gsmNetworkReady = false;
+static bool gsmDataReady = false;
+static uint32_t gsmLastTryMs = 0;
+static uint32_t gsmLastDebugMs = 0;
+static bool gsmLastNetConnected = false;
+static bool gsmLastDataConnected = false;
+static int gsmLastCsq = -1;
+static int gsmLastDbm = 0;
+static String gsmLastOperator = "";
+static String gsmLastApn = "";
+static String gsmLastIp = "";
+static String gsmLastCcid = "";
+static int gsmLastNetPin = -1;
+static int gsmLastStatusPin = -1;
+static uint32_t modemUartBaud = MODEM_UART_BAUD;
+static int modemUartRxPin = MODEM_RX;
+static int modemUartTxPin = MODEM_TX;
+static String mqttActiveTransport = "ethernet";
 static bool lastInputsPub[MAX_INPUTS] = {false};
 static bool lastRelaysPub[MAX_RELAYS] = {false};
+static int8_t lastRelayModePub[MAX_RELAYS] = {2};
 static int lastShutterMove[SHUTTER_MAX] = {-1,-1};
 
 // ===================== 1-Wire (DS18B20) ======================
@@ -510,9 +594,6 @@ static void bleTick(){
   buildStateJsonBle(out);
   if(bleStateReadChar){
     bleStateReadChar->setValue((uint8_t*)out.c_str(), out.length());
-  }
-  if(out.length() > 480){
-    out = "{\"error\":\"state_too_large\"}";
   }
   // Frame: 0x1E 0x1E + payload + 0x1F
   const uint8_t start[2] = {0x1E, 0x1E};
@@ -830,6 +911,7 @@ static void pcaScanAndInit() {
 
   for (int i = 0; i < MAX_RELAYS; i++) {
     overrideRelay[i] = -1;
+    lastRelayModePub[i] = 2; // force first publish
   }
 }
 
@@ -1019,19 +1101,448 @@ static String normalizeBaseTopic(const String& in) {
   return t;
 }
 
+static String normalizeMqttTransport(const String& in) {
+  String t = in;
+  t.trim();
+  t.toLowerCase();
+  if (t == "gsm" || t == "auto") return t;
+  return "ethernet";
+}
+
+static String mqttDesiredTransport() {
+  return normalizeMqttTransport(mqttCfg.transport);
+}
+
+static const uint32_t MQTT_ETH_RETRY_AFTER_FAIL_MS = 30000;
+static const uint32_t MQTT_ETH_RETRY_AFTER_AUTH_FAIL_MS = 300000;
+
+static bool mqttShouldTryEthernetNow() {
+  if (Ethernet.linkStatus() != LinkON) return false;
+  if (mqttLastEthFailMs == 0) return true;
+  const uint32_t age = millis() - mqttLastEthFailMs;
+  if (mqttEthAuthBlocked) return age >= MQTT_ETH_RETRY_AFTER_AUTH_FAIL_MS;
+  return age >= MQTT_ETH_RETRY_AFTER_FAIL_MS;
+}
+
+static bool mqttHasDedicatedGsmBroker();
+
+static String mqttSelectTransport() {
+  String desired = mqttDesiredTransport();
+  if (desired == "gsm") {
+    return "gsm";
+  }
+  if (desired == "ethernet") {
+    // Strict Ethernet mode: never auto-switch to GSM.
+    return "ethernet";
+  }
+  // Auto mode: Ethernet first, GSM fallback when Ethernet is not available.
+  if (Ethernet.linkStatus() != LinkON) return "gsm";
+
+  // Avoid ETH<->GSM ping-pong when Ethernet broker recently failed.
+  if (mqttActiveTransport == "gsm" && mqttHasDedicatedGsmBroker() && !mqttShouldTryEthernetNow()) {
+    return "gsm";
+  }
+  return "ethernet";
+}
+
+static bool mqttHasDedicatedGsmBroker() {
+  return mqttCfg.gsmMqttHost.length() > 0;
+}
+
+static const char* mqttHostForTransport(const String& transport) {
+  if (transport == "gsm" && mqttCfg.gsmMqttHost.length() > 0) {
+    return mqttCfg.gsmMqttHost.c_str();
+  }
+  return mqttCfg.host.c_str();
+}
+
+static uint16_t mqttPortForTransport(const String& transport) {
+  if (transport == "gsm" && mqttCfg.gsmMqttPort > 0) {
+    return mqttCfg.gsmMqttPort;
+  }
+  return mqttCfg.port;
+}
+
+static String mqttUserForTransport(const String& transport) {
+  if (transport == "gsm" && mqttCfg.gsmMqttUser.length() > 0) {
+    return mqttCfg.gsmMqttUser;
+  }
+  return mqttCfg.user;
+}
+
+static String mqttPassForTransport(const String& transport) {
+  if (transport == "gsm" && mqttCfg.gsmMqttUser.length() > 0) {
+    return mqttCfg.gsmMqttPass;
+  }
+  return mqttCfg.pass;
+}
+
+static void mqttApplyServerForTransport(const String& transport) {
+  mqttClient.setServer(mqttHostForTransport(transport), mqttPortForTransport(transport));
+}
+
+static void mqttSwitchTransport(const String& transport) {
+  if (transport == mqttActiveTransport) return;
+  if (mqttClient.connected()) mqttClient.disconnect();
+  if (transport == "gsm") {
+    mqttClient.setClient(mqttGsm);
+  } else {
+    mqttClient.setClient(mqttEth);
+  }
+  mqttActiveTransport = transport;
+  mqttAnnounced = false;
+  lastIpPub = "";
+  Serial.printf("[MQTT] transport=%s\n", mqttActiveTransport.c_str());
+}
+
+static void gsmMarkDown() {
+  gsmNetworkReady = false;
+  gsmDataReady = false;
+  gsmLastNetConnected = false;
+  gsmLastDataConnected = false;
+}
+
+static bool modemStatusIsOn();
+static bool gsmEnsureData();
+
+static void modemDriveExpectedPins() {
+  if (PIN_MODEM_EN >= 0) {
+    pinMode(PIN_MODEM_EN, OUTPUT);
+    digitalWrite(PIN_MODEM_EN, HIGH);
+  }
+  if (PIN_MODEM_PWRKEY >= 0) {
+    pinMode(PIN_MODEM_PWRKEY, OUTPUT);
+    digitalWrite(PIN_MODEM_PWRKEY, HIGH); // idle level for active-low PWRKEY
+  }
+}
+
+static void modemVerifyStartupPins() {
+  int pen = -1;
+  int pwk = -1;
+  if (PIN_MODEM_EN >= 0) pen = digitalRead(PIN_MODEM_EN);
+  if (PIN_MODEM_PWRKEY >= 0) pwk = digitalRead(PIN_MODEM_PWRKEY);
+  Serial.printf("[MODEM] boot pins PEN=%d (expect 1) PWK=%d (expect 1=idle)\n", pen, pwk);
+  if (pen >= 0 && pen != HIGH) {
+    Serial.println("[MODEM] WARN PEN is not HIGH at boot");
+    digitalWrite(PIN_MODEM_EN, HIGH);
+    delay(1);
+    Serial.printf("[MODEM] PEN re-drive -> %d\n", digitalRead(PIN_MODEM_EN));
+  }
+  if (pwk >= 0 && pwk != HIGH) {
+    Serial.println("[MODEM] WARN PWK is LOW at boot (could trigger press)");
+    digitalWrite(PIN_MODEM_PWRKEY, HIGH);
+    delay(1);
+    Serial.printf("[MODEM] PWK re-drive -> %d\n", digitalRead(PIN_MODEM_PWRKEY));
+  }
+}
+
+static String gsmEffectiveApn() {
+  String apn = mqttCfg.apn;
+  apn.trim();
+  if (apn.length() == 0) apn = String(GPRS_DEFAULT_APN);
+  return apn;
+}
+
+static String gsmEffectiveUser() {
+  String u = mqttCfg.gsmUser;
+  u.trim();
+  if (u.length() == 0) u = String(GPRS_DEFAULT_USER);
+  return u;
+}
+
+static String gsmEffectivePass() {
+  String p = mqttCfg.gsmPass;
+  p.trim();
+  if (p.length() == 0) p = String(GPRS_DEFAULT_PASS);
+  return p;
+}
+
+static int gsmRssiToDbm(int csq) {
+  if (csq < 0 || csq > 31) return 0;
+  return -113 + (2 * csq);
+}
+
+static String modemIpToString() {
+  IPAddress ip = modem.localIP();
+  String out = ip.toString();
+  out.trim();
+  return out;
+}
+
+static void gsmDebug1nce(const char* reason, bool force = false) {
+  const uint32_t now = millis();
+  if (!force && (now - gsmLastDebugMs < 10000)) return;
+  gsmLastDebugMs = now;
+
+  int netPin = -1;
+  int statusPin = -1;
+  if (PIN_MODEM_NET >= 0) netPin = digitalRead(PIN_MODEM_NET);
+  if (PIN_MODEM_STATUS >= 0) statusPin = modemStatusIsOn() ? 1 : 0;
+  gsmLastNetPin = netPin;
+  gsmLastStatusPin = statusPin;
+  gsmLastApn = gsmEffectiveApn();
+
+  if (!modemReady) {
+    gsmLastNetConnected = false;
+    gsmLastDataConnected = false;
+    gsmLastCsq = -1;
+    gsmLastDbm = 0;
+    gsmLastOperator = "";
+    gsmLastIp = "";
+    Serial.printf("[GSM][1NCE] %s modem_ready=0 net_pin=%d status_pin=%d sim_pin=%s\n",
+                  reason, netPin, statusPin, (strlen(SIM_PIN) > 0 ? "set" : "empty"));
+    return;
+  }
+
+  const bool net = modem.isNetworkConnected();
+  const bool data = modem.isGprsConnected();
+  const int csq = modem.getSignalQuality();
+  const int dbm = gsmRssiToDbm(csq);
+  String op = modem.getOperator();
+  op.trim();
+  String ip = modemIpToString();
+  String apn = gsmLastApn;
+  gsmLastNetConnected = net;
+  gsmLastDataConnected = data;
+  gsmLastCsq = csq;
+  gsmLastDbm = dbm;
+  gsmLastOperator = op;
+  gsmLastIp = ip;
+
+  Serial.printf("[GSM][1NCE] %s net=%d data=%d csq=%d dbm=%d op=%s apn=%s ip=%s net_pin=%d status_pin=%d\n",
+                reason,
+                net ? 1 : 0,
+                data ? 1 : 0,
+                csq,
+                dbm,
+                op.length() ? op.c_str() : "-",
+                apn.c_str(),
+                ip.length() ? ip.c_str() : "-",
+                netPin,
+                statusPin);
+}
+
+static bool modemStatusIsOn() {
+  if (PIN_MODEM_STATUS < 0) return false;
+  return digitalRead(PIN_MODEM_STATUS) == HIGH;
+}
+
+static void modemPowerKick() {
+  if (PIN_MODEM_PWRKEY < 0) return;
+  // Keep line released high by default, then send active-low pulse.
+  modemDriveExpectedPins();
+  pinMode(PIN_MODEM_PWRKEY, OUTPUT);
+  digitalWrite(PIN_MODEM_PWRKEY, LOW);
+  delay(MODEM_PWRKEY_ON_PULSE_MS);
+  digitalWrite(PIN_MODEM_PWRKEY, HIGH);
+  Serial.printf("[GSM] PWRKEY pulse %lums\n", (unsigned long)MODEM_PWRKEY_ON_PULSE_MS);
+}
+
+static bool modemProbeAtBaud(uint32_t baud, int rxPin, int txPin, String &rxDump) {
+  rxDump = "";
+  SerialAT.end();
+  SerialAT.begin(baud, SERIAL_8N1, rxPin, txPin);
+  delay(80);
+  while (SerialAT.available()) SerialAT.read();
+
+  SerialAT.print("AT\r\n");
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 800) {
+    while (SerialAT.available()) {
+      char c = (char)SerialAT.read();
+      if (rxDump.length() < 180) rxDump += c;
+    }
+    if (rxDump.indexOf("OK") >= 0) return true;
+    delay(2);
+  }
+  return false;
+}
+
+static bool modemProbeAutoBaud() {
+  const uint32_t bauds[] = {115200, 9600, 57600, 38400, 19200};
+  const int candidates[2][2] = {
+    {MODEM_RX, MODEM_TX},
+    {MODEM_TX, MODEM_RX}
+  };
+
+  for (size_t c = 0; c < 2; c++) {
+    const int rxPin = candidates[c][0];
+    const int txPin = candidates[c][1];
+    for (size_t i = 0; i < (sizeof(bauds) / sizeof(bauds[0])); i++) {
+      String rx;
+      if (modemProbeAtBaud(bauds[i], rxPin, txPin, rx)) {
+        modemUartBaud = bauds[i];
+        modemUartRxPin = rxPin;
+        modemUartTxPin = txPin;
+        modemSerialReady = true;
+        Serial.printf("[GSM] AT detected at %lu bps (RX=%d TX=%d)\n",
+                      (unsigned long)bauds[i], rxPin, txPin);
+        return true;
+      }
+      if (rx.length() > 0) {
+        rx.replace("\r", "\\r");
+        rx.replace("\n", "\\n");
+        Serial.printf("[GSM] probe %lu bps (RX=%d TX=%d) rx=%s\n",
+                      (unsigned long)bauds[i], rxPin, txPin, rx.c_str());
+      }
+    }
+  }
+  return false;
+}
+
+static bool gsmEnsureData() {
+  if (gsmDataReady && modem.isGprsConnected()) return true;
+  const uint32_t now = millis();
+  if (gsmLastTryMs != 0 && (now - gsmLastTryMs < 10000)) return false;
+  gsmLastTryMs = now;
+  gsmDebug1nce("check", false);
+
+  modemDriveExpectedPins();
+
+  if (!modemSerialReady) {
+    Serial.println("[GSM] wait");
+    // Set GSM module baud rate and UART pins
+    SerialAT.begin(modemUartBaud, SERIAL_8N1, modemUartRxPin, modemUartTxPin);
+    modemSerialReady = true;
+    delay(500);
+  }
+
+  if (!modemReady) {
+    if (!modem.testAT()) {
+      if (!modemPowerKickDone && PIN_MODEM_PWRKEY >= 0) {
+        modemPowerKick();
+        modemPowerKickDone = true;
+        delay(MODEM_BOOT_WAIT_MS);
+      }
+      if (PIN_MODEM_STATUS >= 0) {
+        Serial.printf("[GSM] STATUS pin=%d\n", modemStatusIsOn() ? 1 : 0);
+      }
+  
+      if (!modem.testAT()) {
+        Serial.println("[GSM] no AT response");
+        gsmMarkDown();
+        gsmDebug1nce("no_at", true);
+        return false;
+      }
+    }
+
+    // Restart takes quite some time; init() is faster.
+    Serial.println("[GSM] Initializing modem...");
+    if (!modem.init()) {
+      Serial.println("[GSM] modem init failed");
+      gsmMarkDown();
+      gsmDebug1nce("modem_init_fail", true);
+      return false;
+    }
+    String modemInfo = modem.getModemName();
+    modemInfo.trim();
+    Serial.printf("[GSM] Modem Name: %s\n", modemInfo.length() ? modemInfo.c_str() : "-");
+
+    modemPowerKickDone = false;
+    modemReady = true;
+    Serial.println("[GSM] modem ready");
+  }
+
+  if (!simPinChecked) {
+    simPinChecked = true;
+    int simStatus = modem.getSimStatus();
+    Serial.printf("[GSM] SIM status=%d\n", simStatus);
+
+    // Unlock SIM card with a PIN if needed
+    if (strlen(SIM_PIN) > 0 && simStatus != 3) {
+      Serial.println("[GSM] Unlocking sim card...");
+      if (!modem.simUnlock(SIM_PIN)) {
+        Serial.println("[GSM] SIM unlock failed");
+        gsmMarkDown();
+        gsmDebug1nce("sim_unlock_fail", true);
+        return false;
+      }
+      delay(300);
+      simStatus = modem.getSimStatus();
+      Serial.printf("[GSM] SIM status=%d\n", simStatus);
+    }
+
+    String ccid = modem.getSimCCID();
+    ccid.trim();
+    gsmLastCcid = ccid;
+    Serial.printf("[GSM] SIM CCID=%s\n", ccid.length() ? ccid.c_str() : "-");
+
+    if (simStatus != 3) {
+      Serial.println("[GSM] SIM not ready");
+    }
+  }
+
+  if (!modem.isNetworkConnected()) {
+    if (!modem.waitForNetwork(10000)) {
+      Serial.println("[GSM] network not ready");
+      gsmMarkDown();
+      gsmDebug1nce("network_wait_fail", true);
+      return false;
+    }
+  }
+
+  gsmNetworkReady = modem.isNetworkConnected();
+  if (!gsmNetworkReady) {
+    Serial.println("[GSM] network attach failed");
+    gsmDataReady = false;
+    gsmDebug1nce("network_attach_fail", true);
+    return false;
+  }
+
+  String apn = gsmEffectiveApn();
+  String gprsUser = gsmEffectiveUser();
+  String gprsPass = gsmEffectivePass();
+  if (!modem.isGprsConnected()) {
+    if (!modem.gprsConnect(apn.c_str(), gprsUser.c_str(), gprsPass.c_str())) {
+      Serial.println("[GSM] gprs connect failed");
+      gsmDataReady = false;
+      gsmDebug1nce("gprs_fail", true);
+      return false;
+    }
+  }
+
+  gsmDataReady = modem.isGprsConnected();
+  if (gsmDataReady) {
+    String ip = modemIpToString();
+    Serial.printf("[GSM] data connected ip=%s\n", ip.c_str());
+    gsmDebug1nce("connect_ok", true);
+  }
+  return gsmDataReady;
+}
+
+static String mqttCurrentIp() {
+  if (mqttActiveTransport == "gsm") {
+    return modemIpToString();
+  }
+  return Ethernet.localIP().toString();
+}
+
 static void mqttCfgToJson(String &out) {
   static JsonDocument doc;
   doc.clear();
   doc["enabled"] = mqttCfg.enabled ? 1 : 0;
+  doc["transport"] = normalizeMqttTransport(mqttCfg.transport);
   doc["host"] = mqttCfg.host;
   doc["port"] = mqttCfg.port;
   doc["user"] = mqttCfg.user;
   doc["pass"] = mqttCfg.pass;
+  doc["gsm_mqtt_host"] = mqttCfg.gsmMqttHost;
+  doc["gsm_mqtt_port"] = mqttCfg.gsmMqttPort;
+  doc["gsm_mqtt_user"] = mqttCfg.gsmMqttUser;
+  doc["gsm_mqtt_pass"] = mqttCfg.gsmMqttPass;
   doc["client_id"] = mqttCfg.clientId;
   doc["base"] = mqttCfg.base;
   doc["discovery_prefix"] = mqttCfg.discoveryPrefix;
   doc["retain"] = mqttCfg.retain ? 1 : 0;
+  doc["apn"] = mqttCfg.apn;
+  doc["gsm_user"] = mqttCfg.gsmUser;
+  doc["gsm_pass"] = mqttCfg.gsmPass;
   doc["connected"] = mqttClient.connected() ? 1 : 0;
+  doc["active_transport"] = mqttActiveTransport;
+  doc["active_host"] = mqttHostForTransport(mqttActiveTransport);
+  doc["active_port"] = mqttPortForTransport(mqttActiveTransport);
+  doc["gsm_network"] = gsmNetworkReady ? 1 : 0;
+  doc["gsm_data"] = gsmDataReady ? 1 : 0;
   serializeJsonPretty(doc, out);
 }
 
@@ -1056,19 +1567,87 @@ static bool loadMqttCfg() {
     return false;
   }
   mqttCfg.enabled = (doc["enabled"] | 0) ? true : false;
+  mqttCfg.transport = normalizeMqttTransport(String((const char*)(doc["transport"] | "ethernet")));
   mqttCfg.host = String((const char*)(doc["host"] | "192.168.1.43"));
   mqttCfg.port = (uint16_t)(doc["port"] | 1883);
   mqttCfg.user = String((const char*)(doc["user"] | ""));
   mqttCfg.pass = String((const char*)(doc["pass"] | ""));
+  if (!doc["gsm_mqtt_host"].isNull()) {
+    String loadedGsmHost = String((const char*)(doc["gsm_mqtt_host"] | ""));
+    loadedGsmHost.trim();
+    if (loadedGsmHost.length() > 0 || mqttCfg.gsmMqttHost.length() == 0) {
+      mqttCfg.gsmMqttHost = loadedGsmHost;
+    }
+  }
+  if (!doc["gsm_mqtt_port"].isNull()) {
+    mqttCfg.gsmMqttPort = (uint16_t)(doc["gsm_mqtt_port"] | 0);
+  }
+  if (!doc["gsm_mqtt_user"].isNull()) {
+    mqttCfg.gsmMqttUser = String((const char*)(doc["gsm_mqtt_user"] | ""));
+  }
+  if (!doc["gsm_mqtt_pass"].isNull()) {
+    mqttCfg.gsmMqttPass = String((const char*)(doc["gsm_mqtt_pass"] | ""));
+  }
   mqttCfg.clientId = String((const char*)(doc["client_id"] | "ESPRelay4"));
   mqttCfg.base = normalizeBaseTopic(String((const char*)(doc["base"] | "esprelay4")));
   mqttCfg.discoveryPrefix = String((const char*)(doc["discovery_prefix"] | "homeassistant"));
   mqttCfg.retain = (doc["retain"] | 1) ? true : false;
+  mqttCfg.apn = String((const char*)(doc["apn"] | GPRS_DEFAULT_APN));
+  mqttCfg.gsmUser = String((const char*)(doc["gsm_user"] | GPRS_DEFAULT_USER));
+  mqttCfg.gsmPass = String((const char*)(doc["gsm_pass"] | GPRS_DEFAULT_PASS));
+  mqttCfg.host.trim();
+  mqttCfg.gsmMqttHost.trim();
+  mqttCfg.apn.trim();
+  if (mqttCfg.gsmMqttHost.length() > 0 && mqttCfg.gsmMqttPort == 0) {
+    mqttCfg.gsmMqttPort = 1883;
+  }
   return true;
 }
 
 static void mqttPublish(const String& topic, const String& payload, bool retain) {
   mqttClient.publish(topic.c_str(), payload.c_str(), retain);
+}
+
+static const char* relayModeText(int8_t mode) {
+  if (mode == -1) return "AUTO";
+  if (mode == 1) return "FORCE_ON";
+  return "FORCE_OFF";
+}
+
+static bool mqttLowDataMode() {
+  return mqttActiveTransport == "gsm";
+}
+
+static const char* mqttStateText(int rc) {
+  switch (rc) {
+    case -4: return "connection timeout";
+    case -3: return "connection lost";
+    case -2: return "connect failed";
+    case -1: return "disconnected";
+    case 0:  return "connected";
+    case 1:  return "bad protocol";
+    case 2:  return "bad client id";
+    case 3:  return "server unavailable";
+    case 4:  return "bad credentials";
+    case 5:  return "unauthorized";
+    default: return "unknown";
+  }
+}
+
+static bool mqttHostLooksPrivateForGsm(const String& host) {
+  if (host.startsWith("192.168.")) return true;
+  if (host.startsWith("10.")) return true;
+  if (host.startsWith("172.")) {
+    int d1 = host.indexOf('.');
+    int d2 = (d1 >= 0) ? host.indexOf('.', d1 + 1) : -1;
+    if (d1 >= 0 && d2 > d1) {
+      int second = host.substring(d1 + 1, d2).toInt();
+      if (second >= 16 && second <= 31) return true;
+    }
+  }
+  if (host.startsWith("127.")) return true;
+  if (host == "localhost") return true;
+  return false;
 }
 
 static String mqttBaseTopic() {
@@ -1402,9 +1981,10 @@ static void mqttPublishAllState() {
   if (!mqttClient.connected()) return;
   String base = mqttBaseTopic();
   mqttPublish(base + "/status", "online", true);
-  String ip = Ethernet.localIP().toString();
+  String ip = mqttCurrentIp();
   mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
   lastIpPub = ip;
+  mqttPublish(base + "/gsm/iccid", gsmLastCcid.length() ? gsmLastCcid : "-", mqttCfg.retain);
   mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
   lastWifiPub = wifiCfg.enabled;
   mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
@@ -1412,6 +1992,8 @@ static void mqttPublishAllState() {
   for (int i = 0; i < totalRelays; i++) {
     mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
     lastRelaysPub[i] = relays[i];
+    mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
+    lastRelayModePub[i] = overrideRelay[i];
   }
   for (int i = 0; i < totalRelays; i++) {
     String rs = ruleSummaryShort(i);
@@ -1445,6 +2027,36 @@ static void mqttPublishAllState() {
   if (dhtPresent && !isnan(dhtHum)) {
     mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
     lastDhtHumPub = dhtHum;
+  }
+}
+
+static void mqttPublishControlState() {
+  if (!mqttClient.connected()) return;
+  String base = mqttBaseTopic();
+  mqttPublish(base + "/status", "online", true);
+  String ip = mqttCurrentIp();
+  mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
+  lastIpPub = ip;
+  mqttPublish(base + "/gsm/iccid", gsmLastCcid.length() ? gsmLastCcid : "-", mqttCfg.retain);
+  for (int i = 0; i < totalInputs; i++) {
+    mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
+    lastInputsPub[i] = inputs[i];
+  }
+  for (int i = 0; i < totalInputs; i++) {
+    mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
+    lastVirtualPub[i] = virtualInputs[i];
+  }
+  for (int i = 0; i < totalRelays; i++) {
+    mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
+    lastRelaysPub[i] = relays[i];
+    mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
+    lastRelayModePub[i] = overrideRelay[i];
+  }
+  for (int s = 0; s < shuttersLimit(); s++) {
+    if (!shCfg[s].enabled) continue;
+    const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
+    mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
+    lastShutterMove[s] = (int)shRt[s].move;
   }
 }
 
@@ -1509,8 +2121,11 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 static void mqttSetup() {
+  mqttCfg.transport = normalizeMqttTransport(mqttCfg.transport);
   mqttCfg.base = normalizeBaseTopic(mqttCfg.base);
-  mqttClient.setServer(mqttCfg.host.c_str(), mqttCfg.port);
+  mqttSwitchTransport(mqttSelectTransport());
+  mqttApplyServerForTransport(mqttActiveTransport);
+  mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
   mqttClient.setCallback(mqttCallback);
 }
 
@@ -1537,60 +2152,162 @@ static void mqttEnsureConnected() {
   if (now - mqttLastConnectMs < 3000) return;
   mqttLastConnectMs = now;
 
+  String desiredTransport = mqttDesiredTransport();
+  String preferredTransport = mqttSelectTransport();
+  bool gsmReadyChecked = false;
+  bool gsmReady = false;
   String clientId = mqttNodeId();
   String willTopic = mqttBaseTopic() + "/status";
-  bool ok = false;
-  Serial.printf("[MQTT] connect %s:%u client=%s\n", mqttCfg.host.c_str(), mqttCfg.port, clientId.c_str());
-  if (mqttCfg.user.length() > 0) {
-    ok = mqttClient.connect(clientId.c_str(), mqttCfg.user.c_str(), mqttCfg.pass.c_str(),
-                            willTopic.c_str(), 0, true, "offline");
+  auto attemptConnect = [&](const String& transport) -> bool {
+    mqttSwitchTransport(transport);
+    mqttApplyServerForTransport(transport);
+
+    if (transport == "gsm") {
+      if (!gsmReadyChecked) {
+        gsmReady = gsmEnsureData();
+        gsmReadyChecked = true;
+      }
+      if (!gsmReady) {
+        Serial.println("[MQTT][GSM] skip connect: 1NCE not ready");
+        return false;
+      }
+    }
+
+    const char* mqttHost = mqttHostForTransport(transport);
+    uint16_t mqttPort = mqttPortForTransport(transport);
+    String mqttHostStr = String(mqttHost);
+    String mqttUser = mqttUserForTransport(transport);
+    String mqttPass = mqttPassForTransport(transport);
+    if (transport == "gsm" && mqttHostLooksPrivateForGsm(mqttHostStr)) {
+      Serial.printf("[MQTT][GSM] WARN host '%s' semble prive, utiliser gsm_mqtt_host public\n", mqttHost);
+    }
+
+    Serial.printf("[MQTT] connect %s:%u client=%s via=%s\n",
+                  mqttHost, mqttPort, clientId.c_str(), mqttActiveTransport.c_str());
+    bool ok = false;
+    if (mqttUser.length() > 0) {
+      ok = mqttClient.connect(clientId.c_str(), mqttUser.c_str(), mqttPass.c_str(),
+                              willTopic.c_str(), 0, true, "offline");
+    } else {
+      ok = mqttClient.connect(clientId.c_str(), willTopic.c_str(), 0, true, "offline");
+    }
+
+    if (ok) {
+      if (transport == "gsm") {
+        Serial.println("[MQTT][GSM] connected via modem");
+      } else {
+        Serial.println("[MQTT][ETH] connected");
+        mqttLastEthFailMs = 0;
+        mqttLastEthFailRc = 0;
+        mqttEthAuthBlocked = false;
+      }
+      if (transport == "gsm") gsmDebug1nce("mqtt_connected", true);
+      mqttSubscribeTopics();
+      if (transport == "gsm") {
+        Serial.println("[MQTT][GSM] low-data mode: publish control state only");
+        mqttPublishControlState();
+        if (!mqttAnnounced) {
+          Serial.println("[MQTT][GSM] discovery skipped (data saver)");
+          mqttAnnounced = true;
+        }
+      } else {
+        mqttPublishAllState();
+        if (!mqttAnnounced) mqttPublishDiscovery();
+      }
+      return true;
+    }
+
+    if (transport == "gsm" && !modem.isGprsConnected()) {
+      gsmDataReady = false;
+    }
+    if (transport == "gsm") gsmDebug1nce("mqtt_connect_fail", true);
+    int rc = mqttClient.state();
+    if (transport == "ethernet") {
+      mqttLastEthFailMs = millis();
+      mqttLastEthFailRc = rc;
+      if (rc == 4 || rc == 5) {
+        if (!mqttEthAuthBlocked) {
+          Serial.println("[MQTT][ETH] auth rejected -> keep GSM until cooldown/config change");
+        }
+        mqttEthAuthBlocked = true;
+      }
+    }
+    Serial.printf("[MQTT] connect failed rc=%d (%s)\n", rc, mqttStateText(rc));
+    return false;
+  };
+
+  if (attemptConnect(preferredTransport)) return;
+
+  if (desiredTransport == "auto" && preferredTransport != "gsm" && mqttHasDedicatedGsmBroker()) {
+    Serial.println("[MQTT] local broker unavailable -> fallback GSM");
+    if (attemptConnect("gsm")) return;
   } else {
-    ok = mqttClient.connect(clientId.c_str(), willTopic.c_str(), 0, true, "offline");
-  }
-  if (ok) {
-    Serial.println("[MQTT] connected");
-    mqttSubscribeTopics();
-    mqttPublishAllState();
-    mqttPublishDiscovery();
-  } else {
-    Serial.printf("[MQTT] connect failed rc=%d\n", mqttClient.state());
+    if (desiredTransport == "auto" && preferredTransport != "gsm" && !mqttHasDedicatedGsmBroker()) {
+      Serial.println("[MQTT] no gsm_mqtt_host configured for fallback");
+    }
   }
 }
 
 static void mqttLoop() {
-  if (!mqttCfg.enabled) return;
+  if (!mqttCfg.enabled) {
+    if (!mqttDisabledWarned) {
+      Serial.println("[MQTT] disabled in config -> no connection attempt");
+      mqttDisabledWarned = true;
+    }
+    if (mqttClient.connected()) mqttClient.disconnect();
+    return;
+  }
+  mqttDisabledWarned = false;
+
+  // Runtime failover/failback while already connected.
+  String selectedTransport = mqttSelectTransport();
+  if (mqttClient.connected() && selectedTransport != mqttActiveTransport) {
+    Serial.printf("[MQTT] switch transport %s -> %s (eth_link=%d)\n",
+                  mqttActiveTransport.c_str(),
+                  selectedTransport.c_str(),
+                  (Ethernet.linkStatus() == LinkON) ? 1 : 0);
+    mqttSwitchTransport(selectedTransport);
+    mqttLastConnectMs = 0; // reconnect immediately after switch
+  }
+
   mqttEnsureConnected();
   mqttClient.loop();
 
+  if (mqttActiveTransport == "gsm") {
+    gsmDebug1nce(mqttClient.connected() ? "loop" : "mqtt_disconnected", false);
+  }
+
   if (!mqttClient.connected()) return;
 
-  if (!mqttAnnounced) {
+  if (!mqttAnnounced && !mqttLowDataMode()) {
     mqttPublishDiscovery();
   }
 
   String base = mqttBaseTopic();
-  String ip = Ethernet.localIP().toString();
-  if(ip != lastIpPub){
-    mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
-    lastIpPub = ip;
-  }
-  if(wifiCfg.enabled != lastWifiPub){
-    mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
-    lastWifiPub = wifiCfg.enabled;
-  }
-  if(bleEnabled != lastBlePub){
-    mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
-    lastBlePub = bleEnabled;
-  }
-  static uint32_t lastRuleCheckMs = 0;
-  const uint32_t now = millis();
-  if(now - lastRuleCheckMs > 2000){
-    lastRuleCheckMs = now;
-    for (int i = 0; i < totalRelays; i++) {
-      String rs = ruleSummaryShort(i);
-      if(rs != lastRulePub[i]){
-        mqttPublish(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
-        lastRulePub[i] = rs;
+  if (!mqttLowDataMode()) {
+    String ip = mqttCurrentIp();
+    if(ip != lastIpPub){
+      mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
+      lastIpPub = ip;
+    }
+    if(wifiCfg.enabled != lastWifiPub){
+      mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
+      lastWifiPub = wifiCfg.enabled;
+    }
+    if(bleEnabled != lastBlePub){
+      mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
+      lastBlePub = bleEnabled;
+    }
+    static uint32_t lastRuleCheckMs = 0;
+    const uint32_t now = millis();
+    if(now - lastRuleCheckMs > 2000){
+      lastRuleCheckMs = now;
+      for (int i = 0; i < totalRelays; i++) {
+        String rs = ruleSummaryShort(i);
+        if(rs != lastRulePub[i]){
+          mqttPublish(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
+          lastRulePub[i] = rs;
+        }
       }
     }
   }
@@ -1611,6 +2328,10 @@ static void mqttLoop() {
       mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
       lastRelaysPub[i] = relays[i];
     }
+    if (overrideRelay[i] != lastRelayModePub[i]) {
+      mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
+      lastRelayModePub[i] = overrideRelay[i];
+    }
   }
 
   for (int s = 0; s < shuttersLimit(); s++) {
@@ -1622,23 +2343,25 @@ static void mqttLoop() {
     }
   }
 
-  for (int i = 0; i < tempCount; i++) {
-    if (fabs(tempC[i] - lastTempPub[i]) >= 0.1f) {
-      mqttPublish(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
-      lastTempPub[i] = tempC[i];
+  if (!mqttLowDataMode()) {
+    for (int i = 0; i < tempCount; i++) {
+      if (fabs(tempC[i] - lastTempPub[i]) >= 0.1f) {
+        mqttPublish(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
+        lastTempPub[i] = tempC[i];
+      }
     }
-  }
 
-  if (dhtPresent && !isnan(dhtTempC)) {
-    if (isnan(lastDhtPub) || fabs(dhtTempC - lastDhtPub) >= 0.1f) {
-      mqttPublish(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
-      lastDhtPub = dhtTempC;
+    if (dhtPresent && !isnan(dhtTempC)) {
+      if (isnan(lastDhtPub) || fabs(dhtTempC - lastDhtPub) >= 0.1f) {
+        mqttPublish(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
+        lastDhtPub = dhtTempC;
+      }
     }
-  }
-  if (dhtPresent && !isnan(dhtHum)) {
-    if (isnan(lastDhtHumPub) || fabs(dhtHum - lastDhtHumPub) >= 0.5f) {
-      mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
-      lastDhtHumPub = dhtHum;
+    if (dhtPresent && !isnan(dhtHum)) {
+      if (isnan(lastDhtHumPub) || fabs(dhtHum - lastDhtHumPub) >= 0.5f) {
+        mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
+        lastDhtHumPub = dhtHum;
+      }
     }
   }
 }
@@ -2134,6 +2857,15 @@ static void buildStateJson(String &out){
   wifi["pass"] = wifiCfg.pass;
   wifi["ip"] = wifiApOn ? WiFi.softAPIP().toString() : "";
 
+  JsonObject mq = doc["mqtt"].to<JsonObject>();
+  mq["enabled"] = mqttCfg.enabled ? 1 : 0;
+  mq["connected"] = mqttClient.connected() ? 1 : 0;
+  mq["transport"] = normalizeMqttTransport(mqttCfg.transport);
+  mq["active_transport"] = mqttActiveTransport;
+  mq["gsm_network"] = gsmNetworkReady ? 1 : 0;
+  mq["gsm_data"] = gsmDataReady ? 1 : 0;
+  mq["ip"] = mqttCurrentIp();
+
   JsonObject sh = doc["shutter"].to<JsonObject>();
   sh["enabled"] = shCfg[0].enabled ? 1 : 0;
   if(shCfg[0].enabled){
@@ -2189,7 +2921,7 @@ static void sendJsonState(Client& c){
 }
 
 static void buildStateJsonBle(String &out){
-  static StaticJsonDocument<1024> doc;
+  static StaticJsonDocument<1536> doc;
   doc.clear();
   JsonArray inA = doc["inputs"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
@@ -2213,6 +2945,25 @@ static void buildStateJsonBle(String &out){
   JsonObject eth = doc["eth"].to<JsonObject>();
   eth["link"] = (Ethernet.linkStatus()==LinkON) ? 1 : 0;
   eth["ip"] = Ethernet.localIP().toString();
+
+  JsonObject mq = doc["mqtt"].to<JsonObject>();
+  mq["enabled"] = mqttCfg.enabled ? 1 : 0;
+  mq["connected"] = mqttClient.connected() ? 1 : 0;
+  mq["active_transport"] = mqttActiveTransport;
+  mq["on_gsm"] = (mqttActiveTransport == "gsm") ? 1 : 0;
+
+  JsonObject gsm = doc["gsm"].to<JsonObject>();
+  gsm["modem_ready"] = modemReady ? 1 : 0;
+  gsm["ready"] = (modemReady && gsmNetworkReady && gsmDataReady) ? 1 : 0;
+  gsm["network"] = gsmNetworkReady ? 1 : 0;
+  gsm["data"] = gsmDataReady ? 1 : 0;
+  gsm["csq"] = gsmLastCsq;
+  gsm["dbm"] = gsmLastDbm;
+  gsm["op"] = gsmLastOperator;
+  gsm["apn"] = gsmLastApn;
+  gsm["ip"] = gsmLastIp;
+  gsm["net_pin"] = gsmLastNetPin;
+  gsm["status_pin"] = gsmLastStatusPin;
 
   doc["modules"] = pcaCount;
   doc["relays_per"] = RELAYS_PER_MODULE;
@@ -2267,14 +3018,22 @@ static void sendJsonBackup(Client& c){
 
   JsonObject mq = doc["mqtt"].to<JsonObject>();
   mq["enabled"] = mqttCfg.enabled ? 1 : 0;
+  mq["transport"] = normalizeMqttTransport(mqttCfg.transport);
   mq["host"] = mqttCfg.host;
   mq["port"] = mqttCfg.port;
   mq["user"] = mqttCfg.user;
   mq["pass"] = mqttCfg.pass;
+  mq["gsm_mqtt_host"] = mqttCfg.gsmMqttHost;
+  mq["gsm_mqtt_port"] = mqttCfg.gsmMqttPort;
+  mq["gsm_mqtt_user"] = mqttCfg.gsmMqttUser;
+  mq["gsm_mqtt_pass"] = mqttCfg.gsmMqttPass;
   mq["client_id"] = mqttCfg.clientId;
   mq["base"] = mqttCfg.base;
   mq["discovery_prefix"] = mqttCfg.discoveryPrefix;
   mq["retain"] = mqttCfg.retain ? 1 : 0;
+  mq["apn"] = mqttCfg.apn;
+  mq["gsm_user"] = mqttCfg.gsmUser;
+  mq["gsm_pass"] = mqttCfg.gsmPass;
 
   String out; serializeJson(doc, out);
   sendText(c, out, "application/json");
@@ -2353,22 +3112,63 @@ static bool applyWifiFromJson(JsonObject o, String &err, bool &restarting) {
 }
 
 static bool applyMqttFromJson(JsonObject o, String &err) {
+  int port = (int)(o["port"] | 1883);
+  if (port < 1 || port > 65535) {
+    err = "mqtt.port out of range";
+    return false;
+  }
+  int gsmMqttPort = (int)(o["gsm_mqtt_port"] | 0);
+  if (gsmMqttPort < 0 || gsmMqttPort > 65535) {
+    err = "mqtt.gsm_mqtt_port out of range";
+    return false;
+  }
+
   mqttCfg.enabled = (o["enabled"] | 0) ? true : false;
+  mqttCfg.transport = normalizeMqttTransport(String((const char*)(o["transport"] | "ethernet")));
   mqttCfg.host = String((const char*)(o["host"] | "192.168.1.43"));
-  mqttCfg.port = (uint16_t)(o["port"] | 1883);
+  mqttCfg.port = (uint16_t)port;
   mqttCfg.user = String((const char*)(o["user"] | ""));
   mqttCfg.pass = String((const char*)(o["pass"] | ""));
+  mqttCfg.gsmMqttHost = String((const char*)(o["gsm_mqtt_host"] | ""));
+  mqttCfg.gsmMqttPort = (uint16_t)gsmMqttPort;
+  mqttCfg.gsmMqttUser = String((const char*)(o["gsm_mqtt_user"] | ""));
+  mqttCfg.gsmMqttPass = String((const char*)(o["gsm_mqtt_pass"] | ""));
   mqttCfg.clientId = String((const char*)(o["client_id"] | "ESPRelay4"));
   mqttCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "esprelay4")));
   mqttCfg.discoveryPrefix = String((const char*)(o["discovery_prefix"] | "homeassistant"));
   mqttCfg.retain = (o["retain"] | 1) ? true : false;
+  mqttCfg.apn = String((const char*)(o["apn"] | GPRS_DEFAULT_APN));
+  mqttCfg.gsmUser = String((const char*)(o["gsm_user"] | GPRS_DEFAULT_USER));
+  mqttCfg.gsmPass = String((const char*)(o["gsm_pass"] | GPRS_DEFAULT_PASS));
+  mqttCfg.host.trim();
+  if (mqttCfg.host.length() == 0) {
+    err = "mqtt.host required";
+    return false;
+  }
+  mqttCfg.gsmMqttHost.trim();
+  if (mqttCfg.gsmMqttHost.length() > 0 && mqttCfg.gsmMqttPort == 0) {
+    mqttCfg.gsmMqttPort = 1883;
+  }
+  mqttCfg.apn.trim();
 
   if(!saveMqttCfg()){
     err = "mqtt fs write failed";
     return false;
   }
+  gsmMarkDown();
+  modemReady = false;
+  modemPowerKickDone = false;
+  simPinChecked = false;
+  modemUartBaud = MODEM_UART_BAUD;
+  modemUartRxPin = MODEM_RX;
+  modemUartTxPin = MODEM_TX;
+  gsmLastTryMs = 0;
+  gsmLastDebugMs = 0;
   mqttSetup();
   mqttAnnounced = false;
+  mqttLastEthFailMs = 0;
+  mqttLastEthFailRc = 0;
+  mqttEthAuthBlocked = false;
   return true;
 }
 
@@ -2461,6 +3261,53 @@ static void ethernetPrintInfo() {
     case LinkOFF: Serial.println("OFF"); break;
     default:      Serial.println("UNKNOWN"); break;
   }
+}
+
+static const char* ethernetLinkText(EthernetLinkStatus status) {
+  switch (status) {
+    case LinkON:  return "ON";
+    case LinkOFF: return "OFF";
+    default:      return "UNKNOWN";
+  }
+}
+
+static void logConnectivityTransitions() {
+  static bool initDone = false;
+  static int8_t lastEth = -2; // -2 uninitialized, -1 unknown, 0 off, 1 on
+  static bool lastModem = false;
+  static bool lastGsmNet = false;
+  static bool lastGsmData = false;
+
+  const EthernetLinkStatus ethLink = Ethernet.linkStatus();
+  int8_t ethNow = -1;
+  if (ethLink == LinkON) ethNow = 1;
+  else if (ethLink == LinkOFF) ethNow = 0;
+
+  if (!initDone || ethNow != lastEth) {
+    if (initDone && lastEth == 1 && ethNow != 1) {
+      Serial.printf("[ETH] communication perdue (link=%s)\n", ethernetLinkText(ethLink));
+    } else if (initDone && lastEth != 1 && ethNow == 1) {
+      Serial.println("[ETH] communication retablie (link=ON)");
+    } else {
+      Serial.printf("[ETH] link=%s\n", ethernetLinkText(ethLink));
+    }
+    lastEth = ethNow;
+  }
+
+  if (!initDone || modemReady != lastModem) {
+    Serial.printf("[GSM] etat modem -> %s\n", modemReady ? "READY" : "DOWN");
+    lastModem = modemReady;
+  }
+  if (!initDone || gsmNetworkReady != lastGsmNet) {
+    Serial.printf("[GSM] etat reseau -> %s\n", gsmNetworkReady ? "UP" : "DOWN");
+    lastGsmNet = gsmNetworkReady;
+  }
+  if (!initDone || gsmDataReady != lastGsmData) {
+    Serial.printf("[GSM] etat data -> %s\n", gsmDataReady ? "UP" : "DOWN");
+    lastGsmData = gsmDataReady;
+  }
+
+  initDone = true;
 }
 
 // ===============================================================
@@ -2683,21 +3530,10 @@ static void handleHttpClient(Client& client){
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
-      mqttCfg.enabled = (tmp["enabled"] | 0) ? true : false;
-      mqttCfg.host = String((const char*)(tmp["host"] | "192.168.143.1"));
-      mqttCfg.port = (uint16_t)(tmp["port"] | 1883);
-      mqttCfg.user = String((const char*)(tmp["user"] | ""));
-      mqttCfg.pass = String((const char*)(tmp["pass"] | ""));
-      mqttCfg.clientId = String((const char*)(tmp["client_id"] | "ESPRelay4"));
-      mqttCfg.base = normalizeBaseTopic(String((const char*)(tmp["base"] | "esprelay4")));
-      mqttCfg.discoveryPrefix = String((const char*)(tmp["discovery_prefix"] | "homeassistant"));
-      mqttCfg.retain = (tmp["retain"] | 1) ? true : false;
-
-      if(!saveMqttCfg()){
-        sendText(client, String("{\"ok\":false,\"error\":\"fs write failed\"}"), "application/json", 500);
+      String errMsg;
+      if(!applyMqttFromJson(tmp.as<JsonObject>(), errMsg)){
+        sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
       } else {
-        mqttSetup();
-        mqttAnnounced = false;
         sendText(client, String("{\"ok\":true,\"applied\":true}"), "application/json");
       }
     }
@@ -2916,6 +3752,16 @@ void setup() {
   Serial.begin(115200);
   delay(600);
   Serial.println("\n=== BOOT Automate PCA9538 + W5500 + Rules + Shutter ownership ===");
+  Serial.printf("[MODEM] EN=%d PWRKEY=%d NET=%d RX=%d TX=%d\n",
+                PIN_MODEM_EN, PIN_MODEM_PWRKEY, PIN_MODEM_NET, PIN_MODEM_RX, PIN_MODEM_TX);
+  Serial.printf("[GSM][1NCE] defaults apn=%s sim_pin=%s\n",
+                GPRS_DEFAULT_APN, (strlen(SIM_PIN) > 0 ? "set" : "empty"));
+
+  modemDriveExpectedPins();
+  if (PIN_MODEM_STATUS >= 0) pinMode(PIN_MODEM_STATUS, INPUT);
+  if (PIN_MODEM_NET >= 0) pinMode(PIN_MODEM_NET, INPUT);
+  delay(2);
+  modemVerifyStartupPins();
 
   // LittleFS
   if(!LittleFS.begin(true)){
@@ -2971,6 +3817,20 @@ void setup() {
 
   // MQTT
   loadMqttCfg();
+  String mqttBootTransport = normalizeMqttTransport(mqttCfg.transport);
+  Serial.printf("[MQTT] cfg enabled=%d transport=%s host=%s:%u gsm_host=%s:%u\n",
+                mqttCfg.enabled ? 1 : 0,
+                mqttBootTransport.c_str(),
+                mqttCfg.host.c_str(),
+                mqttCfg.port,
+                mqttCfg.gsmMqttHost.length() ? mqttCfg.gsmMqttHost.c_str() : "-",
+                mqttCfg.gsmMqttPort);
+  gsmLastTryMs = 0; // force immediate first attempt
+  if (gsmEnsureData()) {
+    Serial.println("[GSM] startup 1NCE: connected");
+  } else {
+    Serial.println("[GSM] startup 1NCE: failed");
+  }
   mqttSetup();
 
   digitalWrite(PIN_LED, 1);
@@ -3041,9 +3901,11 @@ void loop() {
   }
 
   // 1Hz log
+  /*
   static uint32_t t0 = 0;
   if(millis() - t0 > 1000){
     t0 = millis();
+    logConnectivityTransitions();
     String e, r, res;
     for(int i=0;i<totalInputs;i++) e += String(inputs[i] ? 1 : 0);
     for(int i=0;i<totalRelays;i++) r += String(relays[i] ? 1 : 0);
@@ -3052,6 +3914,7 @@ void loop() {
       e.c_str(), r.c_str(), res.c_str()
     );
   }
+  */
 
   delay(10);
 }

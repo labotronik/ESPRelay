@@ -161,6 +161,7 @@ Config MQTT (inclut état connecté).
 ```json
 {
   "enabled": 1,
+  "transport": "ethernet|gsm|auto",
   "host": "192.168.1.43",
   "port": 1883,
   "user": "",
@@ -168,7 +169,10 @@ Config MQTT (inclut état connecté).
   "client_id": "ESPRelay4",
   "base": "esprelay4",
   "discovery_prefix": "homeassistant",
-  "retain": 1
+  "retain": 1,
+  "apn": "iot.1nce.net",
+  "gsm_user": "",
+  "gsm_pass": ""
 }
 ```
 

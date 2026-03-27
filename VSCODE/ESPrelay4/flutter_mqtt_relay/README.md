@@ -12,7 +12,7 @@ flutter run
 
 ## Configuration MQTT
 
-Dans l'onglet `Setup`:
+Dans l'onglet `MQTT`:
 
 - `Broker host`: IP ou DNS du broker.
 - `Broker port`: port MQTT (1883 par defaut).
@@ -21,6 +21,11 @@ Dans l'onglet `Setup`:
 - `Client ID`: identifiant MQTT du client Flutter.
 
 Puis cliquer `Save + Connect`.
+
+## Setup relais
+
+Dans l'onglet `Setup`, vous pouvez renommer les relais `R1..R4`.
+Les noms sont sauvegardes localement dans l'application.
 
 ## Topics utilises
 
@@ -39,5 +44,6 @@ Etats ecoutes:
 L'interface reprend la presentation de la page Ethernet:
 
 - bandeau de statuts (pills),
-- cartes modules,
+- onglet `Input` dedie aux etats des entrees `E1..E4` et `VIN`,
+- cartes modules (dashboard),
 - lignes relais avec etat/entree et actions `ON/OFF/AUTO`.

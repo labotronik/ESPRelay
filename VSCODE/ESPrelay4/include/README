@@ -1,37 +1,133 @@
 
-This directory is intended for project header files.
+ESPRelay4 - Interfaces de communication (carte 4 relais)
+=========================================================
 
-A header file is a file containing C declarations and macro definitions
-to be shared between several project source files. You request the use of a
-header file in your project source file (C, C++, etc) located in `src` folder
-by including it, with the C preprocessing directive `#include'.
+Ce firmware expose plusieurs interfaces pour communiquer avec la carte:
 
-```src/main.c
+1. HTTP/Web (Ethernet et AP Wi-Fi), port 80
+2. MQTT (transport Ethernet, GSM ou auto)
+3. BLE (etat en lecture seule)
+4. OTA HTTP (mise a jour firmware + LittleFS)
 
-#include "header.h"
 
-int main (void)
-{
- ...
-}
+1) HTTP / Web API
+-----------------
+
+- Interface Web: `GET /`
+- API JSON:
+  - `GET /api/state` (sans auth)
+  - `GET /api/auth`
+  - `GET /api/rules`
+  - `GET /api/net`
+  - `GET /api/wifi`
+  - `GET /api/mqtt`
+  - `GET /api/backup`
+  - `PUT /api/auth`
+  - `PUT /api/rules`
+  - `PUT /api/net`
+  - `PUT /api/wifi`
+  - `PUT /api/mqtt`
+  - `PUT /api/backup`
+  - `POST /api/override`
+  - `POST /api/shutter`
+  - `POST /api/ota` (application/octet-stream)
+  - `POST /api/otafs` (application/octet-stream)
+
+Auth HTTP:
+- Type: `Authorization: Basic base64(user:pass)`
+- Identifiants par defaut: `admin / admin`
+- Tous les endpoints `/api/*` sont proteges sauf `GET /api/state`.
+
+Exemples (IP Ethernet):
+
+```bash
+# Lire l'etat global
+curl http://192.168.1.50/api/state
+
+# Forcer le relais 1 ON
+curl -u admin:admin -X POST http://192.168.1.50/api/override \
+  -H "Content-Type: application/json" \
+  -d '{"relay":1,"mode":"FORCE_ON"}'
+
+# Rendre le relais 1 au mode auto
+curl -u admin:admin -X POST http://192.168.1.50/api/override \
+  -H "Content-Type: application/json" \
+  -d '{"relay":1,"mode":"AUTO"}'
 ```
 
-Including a header file produces the same results as copying the header file
-into each source file that needs it. Such copying would be time-consuming
-and error-prone. With a header file, the related declarations appear
-in only one place. If they need to be changed, they can be changed in one
-place, and programs that include the header file will automatically use the
-new version when next recompiled. The header file eliminates the labor of
-finding and changing all the copies as well as the risk that a failure to
-find one copy will result in inconsistencies within a program.
 
-In C, the convention is to give header files names that end with `.h'.
+2) Wi-Fi AP local
+-----------------
 
-Read more about using header files in official GCC documentation:
+Le firmware peut ouvrir un point d'acces local pour l'administration:
 
-* Include Syntax
-* Include Operation
-* Once-Only Headers
-* Computed Includes
+- SSID par defaut: `ESPRelay4-XXXXXX` (derive du MAC)
+- Mot de passe par defaut: `esprelay4`
+- IP AP: `192.168.4.1`
+- Meme API HTTP disponible sur cette IP.
 
-https://gcc.gnu.org/onlinedocs/cpp/Header-Files.html
+Configuration via API:
+- `GET /api/wifi`
+- `PUT /api/wifi` avec `{"enabled":1|0, "pass":"........"}` (>= 8 caracteres)
+
+
+3) MQTT
+-------
+
+Le broker MQTT est configurable via:
+- `GET /api/mqtt`
+- `PUT /api/mqtt`
+
+Base topic par defaut: `esprelay4`
+
+Topics de commande importants:
+- `esprelay4/relay/<n>/set` -> `ON|OFF|AUTO|TOGGLE`
+- `esprelay4/relay/<n>/auto` -> passe en auto
+- `esprelay4/vin/<n>/set` -> `ON|OFF|TOGGLE`
+- `esprelay4/shutter/<n>/set` -> `OPEN|CLOSE|STOP` (ou `UP|DOWN|STOP`)
+- `esprelay4/wifi/ap/set` -> `ON|OFF`
+- `esprelay4/ble/set` -> `ON|OFF`
+
+Topics d'etat:
+- `esprelay4/status` -> `online|offline`
+- `esprelay4/relay/<n>/state`
+- `esprelay4/relay/<n>/mode`
+- `esprelay4/input/<n>/state`
+- `esprelay4/vin/<n>/state`
+- `esprelay4/net/ip`
+- `esprelay4/wifi/ap/state`
+- `esprelay4/ble/state`
+- `esprelay4/temp/...` et `esprelay4/hum/dht/state` si capteurs presents
+
+
+4) BLE (lecture seule)
+----------------------
+
+BLE publie un JSON d'etat (pas de commande directe relais).
+
+- Nom BLE: `ESPRelay4-XXXXXX`
+- Service UUID: `6E400001-B5A3-F393-E0A9-<MAC12>`
+- Char notify/read: `6E400003-B5A3-F393-E0A9-<MAC12>`
+- Char read: `6E400004-B5A3-F393-E0A9-<MAC12>`
+
+Format notify:
+- Envoi environ chaque 1 s si client connecte.
+- Trame: `0x1E 0x1E + payload JSON + 0x1F`
+- Chunk BLE max ~160 octets.
+
+
+5) OTA HTTP
+-----------
+
+Mise a jour via API authentifiee:
+- `POST /api/ota` -> firmware
+- `POST /api/otafs` -> image LittleFS
+- Header requis: `Content-Type: application/octet-stream`
+- Header optionnel: `X-Checksum-Sha256: <sha256_hex>`
+
+
+Notes relais (carte 4 relais)
+-----------------------------
+
+- La numerotation des relais commence a 1 (`relay:1..4` sur une carte 4 relais).
+- Si un relais est reserve a un volet, les commandes override/MQTT sont ignorees ou refusees pour ce relais.

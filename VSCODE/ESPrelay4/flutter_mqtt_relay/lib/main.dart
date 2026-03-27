@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
@@ -37,6 +39,7 @@ class RelayMqttSettings {
     required this.password,
     required this.baseTopic,
     required this.clientId,
+    required this.relayNames,
   });
 
   String host;
@@ -45,6 +48,7 @@ class RelayMqttSettings {
   String password;
   String baseTopic;
   String clientId;
+  Map<int, String> relayNames;
 
   static const _kHost = 'mqtt_host';
   static const _kPort = 'mqtt_port';
@@ -52,6 +56,23 @@ class RelayMqttSettings {
   static const _kPass = 'mqtt_pass';
   static const _kBase = 'mqtt_base';
   static const _kClient = 'mqtt_client';
+  static const _kClientAuto = 'mqtt_client_auto';
+  static const _kRelayNamePrefix = 'relay_name_';
+  static const _legacyClientId = 'ESPRELAY_APP';
+  static const int _relayCount = 4;
+
+  static Map<int, String> _defaultRelayNames() {
+    return <int, String>{
+      for (int i = 1; i <= _relayCount; i++) i: 'R$i',
+    };
+  }
+
+  static String _normalizeRelayName(String? name, int relayId) {
+    final trimmed = (name ?? '').trim();
+    if (trimmed.isEmpty) return 'R$relayId';
+    if (trimmed.length > 24) return trimmed.substring(0, 24);
+    return trimmed;
+  }
 
   static RelayMqttSettings defaults() {
     return RelayMqttSettings(
@@ -61,20 +82,116 @@ class RelayMqttSettings {
       password: '',
       baseTopic: 'esprelay4',
       clientId: 'ESPRELAY_APP',
+      relayNames: _defaultRelayNames(),
     );
   }
 
   static Future<RelayMqttSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
     final d = RelayMqttSettings.defaults();
+    final autoClientId = await _resolveClientId(prefs);
+    final loadedRelayNames = <int, String>{};
+    for (int i = 1; i <= _relayCount; i++) {
+      loadedRelayNames[i] =
+          _normalizeRelayName(prefs.getString('$_kRelayNamePrefix$i'), i);
+    }
     return RelayMqttSettings(
       host: prefs.getString(_kHost) ?? d.host,
       port: prefs.getInt(_kPort) ?? d.port,
       username: prefs.getString(_kUser) ?? d.username,
       password: prefs.getString(_kPass) ?? d.password,
       baseTopic: prefs.getString(_kBase) ?? d.baseTopic,
-      clientId: prefs.getString(_kClient) ?? d.clientId,
+      clientId: autoClientId,
+      relayNames: loadedRelayNames,
     );
+  }
+
+  static Future<String> _resolveClientId(SharedPreferences prefs) async {
+    final saved = (prefs.getString(_kClient) ?? '').trim();
+    if (saved.isNotEmpty && saved != _legacyClientId) return saved;
+
+    final cachedAuto = (prefs.getString(_kClientAuto) ?? '').trim();
+    if (cachedAuto.isNotEmpty) {
+      if (saved.isEmpty || saved == _legacyClientId) {
+        await prefs.setString(_kClient, cachedAuto);
+      }
+      return cachedAuto;
+    }
+
+    final generated = await _buildMachineClientId();
+    await prefs.setString(_kClientAuto, generated);
+    if (saved.isEmpty || saved == _legacyClientId) {
+      await prefs.setString(_kClient, generated);
+    }
+    return generated;
+  }
+
+  static Future<String> _buildMachineClientId() async {
+    try {
+      final info = await DeviceInfoPlugin().deviceInfo;
+      final fingerprint = _fingerprintFromMap(info.data);
+      if (fingerprint.isNotEmpty) return _clientIdFromSeed(fingerprint);
+    } catch (_) {
+      // Keep fallback path for unsupported platforms.
+    }
+    final rnd = Random.secure();
+    return _clientIdFromSeed(
+      '${DateTime.now().microsecondsSinceEpoch}-${rnd.nextInt(1 << 32)}',
+    );
+  }
+
+  static String _fingerprintFromMap(Map<String, dynamic> data) {
+    const preferredKeys = <String>[
+      'machineId',
+      'systemGuid',
+      'deviceId',
+      'identifierForVendor',
+      'id',
+      'hostName',
+      'computerName',
+      'name',
+      'model',
+      'manufacturer',
+      'brand',
+    ];
+
+    final parts = <String>[];
+    for (final key in preferredKeys) {
+      final value = data[key];
+      if (value == null) continue;
+      final s = value.toString().trim();
+      if (s.isEmpty || s.toLowerCase() == 'unknown') continue;
+      parts.add('$key=$s');
+    }
+
+    if (parts.isEmpty) {
+      for (final entry in data.entries) {
+        if (parts.length >= 8) break;
+        final value = entry.value;
+        if (value == null || value is Map || value is List) continue;
+        final s = value.toString().trim();
+        if (s.isEmpty || s.toLowerCase() == 'unknown') continue;
+        parts.add('${entry.key}=$s');
+      }
+    }
+    return parts.join('|');
+  }
+
+  static String _clientIdFromSeed(String seed) {
+    final h1 = _fnv1a32(seed);
+    final h2 = _fnv1a32('$seed#ER4');
+    final suffix = h1.toRadixString(16).padLeft(8, '0').toUpperCase() +
+        h2.toRadixString(16).padLeft(8, '0').toUpperCase();
+    return 'ER4_$suffix';
+  }
+
+  static int _fnv1a32(String input) {
+    var hash = 0x811C9DC5;
+    for (final c in input.codeUnits) {
+      hash ^= c;
+      hash = (hash * 0x01000193) & 0xFFFFFFFF;
+    }
+    return hash;
   }
 
   Future<void> save() async {
@@ -85,6 +202,11 @@ class RelayMqttSettings {
     await prefs.setString(_kPass, password);
     await prefs.setString(_kBase, baseTopic.trim());
     await prefs.setString(_kClient, clientId.trim());
+    for (int i = 1; i <= _relayCount; i++) {
+      final normalized = _normalizeRelayName(relayNames[i], i);
+      relayNames[i] = normalized;
+      await prefs.setString('$_kRelayNamePrefix$i', normalized);
+    }
   }
 }
 
@@ -103,6 +225,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   static const Duration _uiFlushInterval = Duration(milliseconds: 120);
 
   late final TabController _tabController;
+  late final Map<int, TextEditingController> _relayNameCtrls;
 
   RelayMqttSettings _settings = RelayMqttSettings.defaults();
   final _hostCtrl = TextEditingController();
@@ -143,7 +266,10 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
+    _relayNameCtrls = <int, TextEditingController>{
+      for (int i = 1; i <= _maxIoIndex; i++) i: TextEditingController(),
+    };
     _initSettings();
   }
 
@@ -159,6 +285,9 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     _passCtrl.dispose();
     _baseCtrl.dispose();
     _clientCtrl.dispose();
+    for (final ctrl in _relayNameCtrls.values) {
+      ctrl.dispose();
+    }
     super.dispose();
   }
 
@@ -172,7 +301,26 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       _passCtrl.text = loaded.password;
       _baseCtrl.text = loaded.baseTopic;
       _clientCtrl.text = loaded.clientId;
+      for (int i = 1; i <= _maxIoIndex; i++) {
+        _relayNameCtrls[i]!.text = loaded.relayNames[i] ?? 'R$i';
+      }
     });
+  }
+
+  String _relayLabel(int relayId) {
+    return _settings.relayNames[relayId] ?? 'R$relayId';
+  }
+
+  Future<void> _saveRelaySetup() async {
+    FocusScope.of(context).unfocus();
+    for (int i = 1; i <= _maxIoIndex; i++) {
+      final next = _relayNameCtrls[i]!.text.trim();
+      _settings.relayNames[i] = next.isEmpty ? 'R$i' : next;
+    }
+    await _settings.save();
+    if (!mounted) return;
+    setState(() {});
+    _showSnack('Relay names saved.');
   }
 
   Future<void> _connect() async {
@@ -583,16 +731,6 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   }
 
   Widget _statusPills() {
-    final mqttChip = _connected
-        ? _pill('MQTT: ON',
-            bg: const Color(0xFFE8F8F0),
-            border: const Color(0xFF66BB6A),
-            fg: const Color(0xFF1B5E20))
-        : _pill('MQTT: OFF',
-            bg: const Color(0xFFFDECEC),
-            border: const Color(0xFFE57373),
-            fg: const Color(0xFF8E1A1A));
-
     final boardChip = _boardOnline
         ? _pill('BOARD: ONLINE',
             bg: const Color(0xFFE8F8F0),
@@ -610,10 +748,6 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
           spacing: 8,
           runSpacing: 8,
           children: [
-            _pill('IP: $_ethIp',
-                bg: Colors.white,
-                border: const Color(0xFFDADADA),
-                fg: Colors.black87),
             _pill('ICCID: $_iccid',
                 bg: Colors.white,
                 border: const Color(0xFFDADADA),
@@ -626,21 +760,15 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
           runSpacing: 8,
           children: [
             boardChip,
-            mqttChip,
           ],
         ),
       ],
     );
   }
 
-  Widget _relayRow(int relayId, int inputId) {
+  Widget _relayRow(int relayId) {
     final relayOn = _relayStates[relayId] ?? false;
-    final relayMode = _relayModes[relayId] ?? '--';
-    final inputOn = _inputStates[inputId] ?? false;
-    final vinOn = _vinStates[inputId] ?? false;
-
-    final ledColor =
-        inputOn ? const Color(0xFF27C046) : const Color(0xFFE0E0E0);
+    final relayName = _relayLabel(relayId);
 
     final relayStateChip = relayOn
         ? _pill('ON',
@@ -664,29 +792,16 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
         children: [
           Row(
             children: [
-              Text('R$relayId',
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              const SizedBox(width: 8),
-              relayStateChip,
-              const SizedBox(width: 8),
-              Text(relayMode,
-                  style: const TextStyle(fontSize: 11, color: Colors.black54)),
-              const Spacer(),
-              Container(
-                width: 14,
-                height: 14,
-                decoration: BoxDecoration(
-                  color: ledColor,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: const Color(0xFFBDBDBD)),
+              Expanded(
+                child: Text(
+                  relayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
               ),
-              const SizedBox(width: 6),
-              Text('E$inputId',
-                  style: const TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(width: 6),
-              Text(vinOn ? 'VIN ON' : 'VIN OFF',
-                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              const SizedBox(width: 8),
+              relayStateChip,
             ],
           ),
           const SizedBox(height: 8),
@@ -726,6 +841,78 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
 
   Widget _moduleCard(int moduleIndex) {
     final baseRelay = moduleIndex * 4;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFDADADA)),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Module ${moduleIndex + 1}',
+              style:
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          _relayRow(baseRelay + 1),
+          _relayRow(baseRelay + 2),
+          _relayRow(baseRelay + 3),
+          _relayRow(baseRelay + 4),
+        ],
+      ),
+    );
+  }
+
+  Widget _inputRow(int inputId) {
+    final inputOn = _inputStates[inputId] ?? false;
+    final vinOn = _vinStates[inputId] ?? false;
+
+    final inputChip = inputOn
+        ? _pill('ON',
+            bg: const Color(0xFFE8F8F0),
+            border: const Color(0xFF66BB6A),
+            fg: const Color(0xFF1B5E20))
+        : _pill('OFF',
+            bg: const Color(0xFFF3F3F3),
+            border: const Color(0xFFDADADA),
+            fg: Colors.black87);
+
+    final vinChip = vinOn
+        ? _pill('VIN ON',
+            bg: const Color(0xFFE8F8F0),
+            border: const Color(0xFF66BB6A),
+            fg: const Color(0xFF1B5E20))
+        : _pill('VIN OFF',
+            bg: const Color(0xFFF3F3F3),
+            border: const Color(0xFFDADADA),
+            fg: Colors.black87);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFDADADA)),
+      ),
+      child: Row(
+        children: [
+          Text(
+            'E$inputId',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(width: 8),
+          inputChip,
+          const Spacer(),
+          vinChip,
+        ],
+      ),
+    );
+  }
+
+  Widget _inputsModuleCard(int moduleIndex) {
     final baseInput = moduleIndex * 4;
 
     return Container(
@@ -742,12 +929,25 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
               style:
                   const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
-          _relayRow(baseRelay + 1, baseInput + 1),
-          _relayRow(baseRelay + 2, baseInput + 2),
-          _relayRow(baseRelay + 3, baseInput + 3),
-          _relayRow(baseRelay + 4, baseInput + 4),
+          _inputRow(baseInput + 1),
+          _inputRow(baseInput + 2),
+          _inputRow(baseInput + 3),
+          _inputRow(baseInput + 4),
         ],
       ),
+    );
+  }
+
+  Widget _inputsTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        if (_connected) ...[
+          _statusPills(),
+          const SizedBox(height: 12),
+        ],
+        _inputsModuleCard(0),
+      ],
     );
   }
 
@@ -755,8 +955,10 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        _statusPills(),
-        const SizedBox(height: 12),
+        if (_connected) ...[
+          _statusPills(),
+          const SizedBox(height: 12),
+        ],
         Container(
           decoration: BoxDecoration(
             color: Colors.white,
@@ -764,28 +966,31 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
             border: Border.all(color: const Color(0xFFDADADA)),
           ),
           padding: const EdgeInsets.all(12),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: Text(
-                  _statusText,
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: _connected
-                        ? const Color(0xFF1B5E20)
-                        : const Color(0xFF8E1A1A),
-                  ),
+              Text(
+                _statusText,
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color:
+                      _connected ? const Color(0xFF1B5E20) : const Color(0xFF8E1A1A),
                 ),
               ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: (_busy || _connected) ? null : _connect,
-                child: const Text('Connect'),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton(
-                onPressed: (!_busy && _connected) ? () => _disconnect() : null,
-                child: const Text('Disconnect'),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: (_busy || _connected) ? null : _connect,
+                    child: const Text('Connect'),
+                  ),
+                  OutlinedButton(
+                    onPressed: (!_busy && _connected) ? () => _disconnect() : null,
+                    child: const Text('Disconnect'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -823,7 +1028,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     );
   }
 
-  Widget _setupTab() {
+  Widget _mqttTab() {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -851,7 +1056,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
                 children: [
                   FilledButton(
                     onPressed: _busy ? null : _connect,
-                    child: const Text('Save + Connect'),
+                    child: const Text('Save'),
                   ),
                   const SizedBox(width: 8),
                   OutlinedButton(
@@ -888,6 +1093,36 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     );
   }
 
+  Widget _setupTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFFDADADA)),
+          ),
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Relay names',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 10),
+              for (int i = 1; i <= _maxIoIndex; i++)
+                _field('Relay $i label', _relayNameCtrls[i]!),
+              FilledButton(
+                onPressed: _saveRelaySetup,
+                child: const Text('Save setup'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -897,6 +1132,8 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
           controller: _tabController,
           tabs: const [
             Tab(text: 'Dashboard'),
+            Tab(text: 'Input'),
+            Tab(text: 'MQTT'),
             Tab(text: 'Setup'),
           ],
         ),
@@ -905,6 +1142,8 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
         controller: _tabController,
         children: [
           _dashboardTab(),
+          _inputsTab(),
+          _mqttTab(),
           _setupTab(),
         ],
       ),

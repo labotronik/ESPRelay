@@ -283,6 +283,12 @@
       </div>
 
       <div class="form-grid" style="margin-top:8px;">
+        <span class="muted" data-i18n="mqtt.transport">Transport</span>
+        <select id="mqtt_transport">
+          <option value="ethernet" data-i18n="mqtt.transport_ethernet">Ethernet</option>
+          <option value="gsm" data-i18n="mqtt.transport_gsm">GSM (A7670)</option>
+          <option value="auto" data-i18n="mqtt.transport_auto">Auto (ETH->GSM)</option>
+        </select>
         <span class="muted" data-i18n="mqtt.broker">Broker</span>
         <input id="mqtt_host" type="text" placeholder="192.168.1.43">
         <span class="muted" data-i18n="mqtt.port">Port</span>
@@ -300,6 +306,31 @@
       </div>
       <div class="inline" style="margin-top:8px;">
         <label><input id="mqtt_retain" type="checkbox" checked> <span data-i18n="mqtt.retain">Retain</span></label>
+      </div>
+
+      <div class="sep"></div>
+      <h3 data-i18n="mqtt.gsm_card_title">📡 MQTT GSM (A7670)</h3>
+      <div class="muted" data-i18n="mqtt.gsm_card_desc">Dedicated MQTT settings used when transport is GSM.</div>
+      <div class="inline" style="margin-top:8px;">
+        <span id="mqtt_gsm_status" class="pill">MQTT GSM: ?</span>
+      </div>
+      <div class="sep"></div>
+
+      <div class="form-grid" style="margin-top:8px;">
+        <span class="muted" data-i18n="mqtt.gsm_broker">GSM broker (optional)</span>
+        <input id="mqtt_gsm_host" type="text" placeholder="82.64.24.196">
+        <span class="muted" data-i18n="mqtt.gsm_port">GSM port</span>
+        <input id="mqtt_gsm_port" type="number" min="0" max="65535" value="0">
+        <span class="muted" data-i18n="mqtt.gsm_mqtt_user">GSM MQTT user</span>
+        <input id="mqtt_gsm_mqtt_user" type="text" placeholder="">
+        <span class="muted" data-i18n="mqtt.gsm_mqtt_pass">GSM MQTT pass</span>
+        <input id="mqtt_gsm_mqtt_pass" type="password" placeholder="">
+        <span class="muted" data-i18n="mqtt.apn">APN</span>
+        <input id="mqtt_apn" type="text" placeholder="iot.1nce.net">
+        <span class="muted" data-i18n="mqtt.gsm_user">GSM user</span>
+        <input id="mqtt_gsm_user" type="text" placeholder="">
+        <span class="muted" data-i18n="mqtt.gsm_pass">GSM pass</span>
+        <input id="mqtt_gsm_pass" type="password" placeholder="">
       </div>
 
       <div class="sep"></div>
@@ -1394,8 +1425,20 @@ async function saveWifiPass(){
 }
 
 // -------- MQTT config --------
+function setMqttStatusLabels(cfg){
+  const status = cfg.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
+  const via = (cfg.active_transport || cfg.transport || "ethernet").toUpperCase();
+  $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status} (${via})`;
+
+  const activeLower = String(cfg.active_transport || cfg.transport || "").toLowerCase();
+  const gsmConnected = !!cfg.connected && activeLower === "gsm";
+  const gsmStatus = gsmConnected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
+  if($("mqtt_gsm_status")) $("mqtt_gsm_status").textContent = `${t("mqtt.gsm_status","MQTT GSM")}: ${gsmStatus}`;
+}
+
 function setMqttUI(cfg){
   $("mqtt_enabled").checked = !!cfg.enabled;
+  $("mqtt_transport").value = cfg.transport || "ethernet";
   $("mqtt_host").value = cfg.host || "192.168.1.43";
   $("mqtt_port").value = cfg.port || 1883;
   $("mqtt_user").value = cfg.user || "";
@@ -1403,16 +1446,25 @@ function setMqttUI(cfg){
   $("mqtt_client").value = cfg.client_id || "ESPRelay4";
   $("mqtt_base").value = cfg.base || "esprelay4";
   $("mqtt_disc").value = cfg.discovery_prefix || "homeassistant";
+  $("mqtt_gsm_host").value = cfg.gsm_mqtt_host || "";
+  $("mqtt_gsm_port").value = cfg.gsm_mqtt_port || 0;
+  $("mqtt_gsm_mqtt_user").value = cfg.gsm_mqtt_user || "";
+  $("mqtt_gsm_mqtt_pass").value = cfg.gsm_mqtt_pass || "";
+  $("mqtt_apn").value = cfg.apn || "iot.1nce.net";
+  $("mqtt_gsm_user").value = cfg.gsm_user || "";
+  $("mqtt_gsm_pass").value = cfg.gsm_pass || "";
   $("mqtt_retain").checked = cfg.retain !== 0;
-  const status = cfg.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
-  $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status}`;
+  setMqttStatusLabels(cfg);
   $("mqtt_hint").textContent = cfg.enabled ? "" : t("mqtt.disabled","MQTT disabled");
   mqttDirty = false;
 }
 
 function readMqttUI(){
+  const gsmPortRaw = $("mqtt_gsm_port").value.trim();
+  const gsmPort = gsmPortRaw === "" ? 0 : Number(gsmPortRaw);
   return {
     enabled: $("mqtt_enabled").checked ? 1 : 0,
+    transport: $("mqtt_transport").value || "ethernet",
     host: $("mqtt_host").value.trim(),
     port: Number($("mqtt_port").value||1883),
     user: $("mqtt_user").value.trim(),
@@ -1420,6 +1472,13 @@ function readMqttUI(){
     client_id: $("mqtt_client").value.trim(),
     base: $("mqtt_base").value.trim(),
     discovery_prefix: $("mqtt_disc").value.trim(),
+    gsm_mqtt_host: $("mqtt_gsm_host").value.trim(),
+    gsm_mqtt_port: Number.isFinite(gsmPort) ? gsmPort : 0,
+    gsm_mqtt_user: $("mqtt_gsm_mqtt_user").value.trim(),
+    gsm_mqtt_pass: $("mqtt_gsm_mqtt_pass").value.trim(),
+    apn: $("mqtt_apn").value.trim(),
+    gsm_user: $("mqtt_gsm_user").value.trim(),
+    gsm_pass: $("mqtt_gsm_pass").value.trim(),
     retain: $("mqtt_retain").checked ? 1 : 0
   };
 }
@@ -1431,18 +1490,25 @@ async function loadMqtt(){
     if(!mqttCfg || mqttCfg.host === undefined){
       mqttCfg = {
         enabled:0, host:"192.168.1.43", port:1883, user:"", pass:"",
-        client_id:"ESPRelay4", base:"esprelay4", discovery_prefix:"homeassistant", retain:1
+        client_id:"ESPRelay4", base:"esprelay4", discovery_prefix:"homeassistant", retain:1,
+        transport:"ethernet",
+        gsm_mqtt_host:"", gsm_mqtt_port:0, gsm_mqtt_user:"", gsm_mqtt_pass:"",
+        apn:"iot.1nce.net", gsm_user:"", gsm_pass:"",
+        active_transport:"ethernet"
       };
     }
     if(!mqttDirty) setMqttUI(mqttCfg);
     else {
-      const status = mqttCfg.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
-      $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status}`;
+      setMqttStatusLabels(mqttCfg);
     }
   }catch(e){
     console.warn("MQTT fetch failed", e);
-    const status = mqttCfg?.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
-    if($("mqtt_status")) $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status}`;
+    if(mqttCfg){
+      setMqttStatusLabels(mqttCfg);
+    } else {
+      const fallback = {connected:0, active_transport:"ethernet", transport:"ethernet"};
+      setMqttStatusLabels(fallback);
+    }
     if($("mqtt_hint")) $("mqtt_hint").textContent = t("toast.mqtt_unavailable","GET /api/mqtt unavailable");
   }
 }
@@ -1521,8 +1587,9 @@ async function uploadOta(kind){
   xhr.send(file);
 }
 
-["mqtt_enabled","mqtt_host","mqtt_port","mqtt_user","mqtt_pass","mqtt_client","mqtt_base","mqtt_disc","mqtt_retain"]
+["mqtt_enabled","mqtt_transport","mqtt_host","mqtt_port","mqtt_user","mqtt_pass","mqtt_client","mqtt_base","mqtt_disc","mqtt_gsm_host","mqtt_gsm_port","mqtt_gsm_mqtt_user","mqtt_gsm_mqtt_pass","mqtt_apn","mqtt_gsm_user","mqtt_gsm_pass","mqtt_retain"]
   .forEach(id => $(id).addEventListener("input", ()=>{ mqttDirty = true; }));
+$("mqtt_transport").addEventListener("change", ()=>{ mqttDirty = true; });
 
 // -------- Backup / Restore --------
 async function downloadBackup(){
