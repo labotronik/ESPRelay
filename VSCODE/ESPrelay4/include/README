@@ -5,7 +5,7 @@ ESPRelay4 - Interfaces de communication (carte 4 relais)
 Ce firmware expose plusieurs interfaces pour communiquer avec la carte:
 
 1. HTTP/Web (Ethernet et AP Wi-Fi), port 80
-2. MQTT (transport Ethernet, GSM ou auto)
+2. MQTT (2 clients paralleles Ethernet + GSM selon configuration)
 3. BLE (etat en lecture seule)
 4. OTA HTTP (mise a jour firmware + LittleFS)
 
@@ -77,6 +77,11 @@ Configuration via API:
 Le broker MQTT est configurable via:
 - `GET /api/mqtt`
 - `PUT /api/mqtt`
+
+Comportement transport:
+- `transport: "gsm"` -> client MQTT GSM uniquement
+- `transport: "ethernet"` -> client MQTT Ethernet uniquement
+- `transport: "auto"` -> clients MQTT Ethernet + GSM en parallele si `gsm_mqtt_host` est renseigne
 
 Base topic par defaut: `esprelay4`
 

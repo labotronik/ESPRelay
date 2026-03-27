@@ -176,6 +176,11 @@ Config MQTT (inclut état connecté).
 }
 ```
 
+Règle transport:
+- `gsm` : active uniquement le client MQTT GSM.
+- `ethernet` : active uniquement le client MQTT Ethernet.
+- `auto` : active le client MQTT Ethernet, et active aussi le client MQTT GSM si `gsm_mqtt_host` est configuré.
+
 ### GET /api/backup
 Retourne un backup complet :
 ```json

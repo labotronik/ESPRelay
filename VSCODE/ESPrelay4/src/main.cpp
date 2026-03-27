@@ -81,6 +81,8 @@ static const char GPRS_DEFAULT_PASS[] = "";
 static const char SIM_PIN[] = "";
 // MQTT keepalive in seconds (default 30 min for low GSM traffic)
 static const uint16_t MQTT_KEEPALIVE_SECONDS = 1800;
+static const uint16_t MQTT_SOCKET_TIMEOUT_SECONDS = 1;
+static const uint32_t MQTT_STARTUP_GRACE_MS = 15000;
 
 // I2C (PCA9538)
 static const int I2C_SDA = 8;     
@@ -134,6 +136,8 @@ static void buildStateJson(String &out);
 static void buildStateJsonBle(String &out);
 static bool saveBleCfg();
 static bool loadBleCfg();
+static bool clientWriteAll(Client& c, const uint8_t* data, size_t len, uint32_t timeoutMs = 1500);
+static bool clientWriteString(Client& c, const String& s, uint32_t timeoutMs = 1500);
 
 static String macHex12Upper(){
   uint64_t mac64 = ESP.getEfuseMac();
@@ -228,13 +232,13 @@ struct MqttConfig {
 
 static MqttConfig mqttCfg = {
   true,                    // enabled: active/desactive MQTT
-  String("ethernet"),      // transport: ethernet | gsm | auto
+  String("auto"),          // transport: ethernet | gsm | auto
   String("192.168.1.43"),  // host: broker MQTT principal (Ethernet/auto)
   1883,                    // port: port du broker principal
   String(""),              // user: identifiant MQTT principal
   String(""),              // pass: mot de passe MQTT principal
-  String("82.64.24.196"),  // gsmMqttHost: broker dedie GSM (optionnel)
-  1883,                    // gsmMqttPort: port broker dedie GSM
+  String(""),              // gsmMqttHost: broker dedie GSM (optionnel)
+  0,                       // gsmMqttPort: port broker dedie GSM
   String(""),              // gsmMqttUser: identifiant MQTT dedie GSM
   String(""),              // gsmMqttPass: mot de passe MQTT dedie GSM
   String("ESPRelay4"),     // clientId: identifiant client MQTT
@@ -250,13 +254,19 @@ static EthernetClient mqttEth;
 static HardwareSerial& SerialAT = Serial1;
 static TinyGsm modem(SerialAT);
 static TinyGsmClient mqttGsm(modem);
-static PubSubClient mqttClient(mqttEth);
-static uint32_t mqttLastConnectMs = 0;
+static PubSubClient mqttClientEth(mqttEth);
+static PubSubClient mqttClientGsm(mqttGsm);
+static uint32_t mqttLastConnectEthMs = 0;
+static uint32_t mqttLastConnectGsmMs = 0;
 static uint32_t mqttLastEthFailMs = 0;
 static int mqttLastEthFailRc = 0;
 static bool mqttEthAuthBlocked = false;
-static bool mqttAnnounced = false;
+static bool mqttStartupGraceLogged = false;
+static bool mqttAnnouncedEth = false;
+static bool mqttAnnouncedGsm = false;
 static bool mqttDisabledWarned = false;
+static volatile bool mqttFastCommandPending = false;
+static uint32_t mqttFastModeUntilMs = 0;
 static bool modemSerialReady = false;
 static bool modemReady = false;
 static bool modemPowerKickDone = false;
@@ -278,7 +288,8 @@ static int gsmLastStatusPin = -1;
 static uint32_t modemUartBaud = MODEM_UART_BAUD;
 static int modemUartRxPin = MODEM_RX;
 static int modemUartTxPin = MODEM_TX;
-static String mqttActiveTransport = "ethernet";
+static String lastIpPubEth = "";
+static String lastIpPubGsm = "";
 static bool lastInputsPub[MAX_INPUTS] = {false};
 static bool lastRelaysPub[MAX_RELAYS] = {false};
 static int8_t lastRelayModePub[MAX_RELAYS] = {2};
@@ -302,6 +313,7 @@ static float lastDhtPub = NAN;
 static float dhtHum = NAN;
 static float lastDhtHumPub = NAN;
 static bool dhtCheckDone = false;
+static uint32_t dhtNextProbeMs = 0;
 
 
 struct AuthConfig {
@@ -346,7 +358,6 @@ uint8_t totalInputs = 4;
 // Overrides : -1 auto, 0 force off, 1 force on (uniquement pour relais NON réservés)
 int8_t overrideRelay[MAX_RELAYS];
 String lastRulePub[MAX_RELAYS];
-String lastIpPub = "";
 bool lastWifiPub = false;
 bool lastBlePub = false;
 
@@ -395,6 +406,7 @@ static bool i2cWriteReg8(uint8_t addr, uint8_t reg, uint8_t val) {
 // LittleFS helpers
 // ===============================================================
 static String readFile(const char* path) {
+  if (!LittleFS.exists(path)) return "";
   File f = LittleFS.open(path, "r");
   if(!f) return "";
   String s = f.readString();
@@ -503,6 +515,7 @@ static void updateWifiState(bool force=false){
   uint32_t now = millis();
   if(!force && (now - wifiLastCheckMs < 1000)) return;
   wifiLastCheckMs = now;
+  // Keep AP available when enabled to guarantee local access even if LAN routing is broken.
   const bool shouldRun = wifiCfg.enabled;
   if(shouldRun && !wifiApOn) startWifiAp();
   else if(!shouldRun && wifiApOn) stopWifiAp();
@@ -832,33 +845,41 @@ static void applyNetCfg() {
     Ethernet.begin(mac, netCfg.ip, netCfg.dns, netCfg.gw, netCfg.sn);
   }
   server.begin();
-
 }
 
 // Streaming file (évite page HTML tronquée)
 static void sendFile(Client& client, const char* path, const char* contentType) {
   File f = LittleFS.open(path, "r");
   if (!f) {
-    client.println("HTTP/1.1 404 Not Found");
-    client.println("Content-Type: text/plain; charset=utf-8");
-    client.println("Connection: close");
-    client.println();
-    client.print("File not found: ");
-    client.println(path);
+    String body = String("File not found: ") + path + "\n";
+    String hdr = "HTTP/1.1 404 Not Found\r\n";
+    hdr += "Content-Type: text/plain; charset=utf-8\r\n";
+    hdr += "Connection: close\r\n";
+    hdr += "Content-Length: " + String(body.length()) + "\r\n\r\n";
+    clientWriteString(client, hdr, 4000);
+    clientWriteString(client, body, 4000);
     return;
   }
 
   size_t size = f.size();
-  client.println("HTTP/1.1 200 OK");
-  client.print("Content-Type: "); client.println(contentType);
-  client.print("Content-Length: "); client.println(size);
-  client.println("Connection: close");
-  client.println();
+  String hdr = "HTTP/1.1 200 OK\r\n";
+  hdr += "Content-Type: ";
+  hdr += contentType;
+  hdr += "\r\n";
+  hdr += "Content-Length: " + String((unsigned)size) + "\r\n";
+  hdr += "Connection: close\r\n\r\n";
+  if (!clientWriteString(client, hdr, 4000)) {
+    f.close();
+    return;
+  }
 
-  uint8_t buf[1024];
+  uint8_t buf[512];
   while (f.available()) {
     int n = f.read(buf, sizeof(buf));
-    if (n > 0) client.write(buf, n);
+    if (n <= 0) break;
+    if (!clientWriteAll(client, buf, (size_t)n, 4000)) {
+      break;
+    }
     delay(0);
   }
   f.close();
@@ -1106,7 +1127,7 @@ static String normalizeMqttTransport(const String& in) {
   t.trim();
   t.toLowerCase();
   if (t == "gsm" || t == "auto") return t;
-  return "ethernet";
+  return "auto";
 }
 
 static String mqttDesiredTransport() {
@@ -1126,27 +1147,20 @@ static bool mqttShouldTryEthernetNow() {
 
 static bool mqttHasDedicatedGsmBroker();
 
-static String mqttSelectTransport() {
-  String desired = mqttDesiredTransport();
-  if (desired == "gsm") {
-    return "gsm";
-  }
-  if (desired == "ethernet") {
-    // Strict Ethernet mode: never auto-switch to GSM.
-    return "ethernet";
-  }
-  // Auto mode: Ethernet first, GSM fallback when Ethernet is not available.
-  if (Ethernet.linkStatus() != LinkON) return "gsm";
-
-  // Avoid ETH<->GSM ping-pong when Ethernet broker recently failed.
-  if (mqttActiveTransport == "gsm" && mqttHasDedicatedGsmBroker() && !mqttShouldTryEthernetNow()) {
-    return "gsm";
-  }
-  return "ethernet";
-}
-
 static bool mqttHasDedicatedGsmBroker() {
   return mqttCfg.gsmMqttHost.length() > 0;
+}
+
+static bool mqttTransportAllowsEthernet() {
+  return mqttDesiredTransport() != "gsm";
+}
+
+static bool mqttTransportAllowsGsm() {
+  String desired = mqttDesiredTransport();
+  if (desired == "gsm") return true;
+  // Le mode double client ETH+GSM est active en mode auto avec broker GSM dedie.
+  if (desired == "auto") return mqttHasDedicatedGsmBroker();
+  return false;
 }
 
 static const char* mqttHostForTransport(const String& transport) {
@@ -1177,22 +1191,44 @@ static String mqttPassForTransport(const String& transport) {
   return mqttCfg.pass;
 }
 
-static void mqttApplyServerForTransport(const String& transport) {
-  mqttClient.setServer(mqttHostForTransport(transport), mqttPortForTransport(transport));
+static bool mqttEthConnectedSafe() {
+  return mqttClientEth.connected();
 }
 
-static void mqttSwitchTransport(const String& transport) {
-  if (transport == mqttActiveTransport) return;
-  if (mqttClient.connected()) mqttClient.disconnect();
-  if (transport == "gsm") {
-    mqttClient.setClient(mqttGsm);
-  } else {
-    mqttClient.setClient(mqttEth);
-  }
-  mqttActiveTransport = transport;
-  mqttAnnounced = false;
-  lastIpPub = "";
-  Serial.printf("[MQTT] transport=%s\n", mqttActiveTransport.c_str());
+static bool mqttCanQueryGsmClient() {
+  if (!mqttTransportAllowsGsm()) return false;
+  if (!modemSerialReady) return false;
+  if (!modemReady) return false;
+  return true;
+}
+
+static bool mqttGsmConnectedSafe() {
+  if (!mqttCanQueryGsmClient()) return false;
+  // Prevent stale PubSub state from being reported as connected when GSM data is down.
+  if (!gsmNetworkReady || !gsmDataReady) return false;
+  return mqttClientGsm.connected();
+}
+
+static PubSubClient* mqttClientForTransport(const String& transport) {
+  return (transport == "gsm") ? &mqttClientGsm : &mqttClientEth;
+}
+
+static bool mqttConnectedForTransport(const String& transport) {
+  if (transport == "gsm") return mqttGsmConnectedSafe();
+  return mqttEthConnectedSafe();
+}
+
+static void mqttApplyServerForTransport(const String& transport) {
+  mqttClientForTransport(transport)->setServer(mqttHostForTransport(transport), mqttPortForTransport(transport));
+}
+
+static String mqttActiveTransportText() {
+  const bool eth = mqttEthConnectedSafe();
+  const bool gsm = mqttGsmConnectedSafe();
+  if (eth && gsm) return "ethernet+gsm";
+  if (eth) return "ethernet";
+  if (gsm) return "gsm";
+  return "none";
 }
 
 static void gsmMarkDown() {
@@ -1510,11 +1546,19 @@ static bool gsmEnsureData() {
   return gsmDataReady;
 }
 
-static String mqttCurrentIp() {
-  if (mqttActiveTransport == "gsm") {
+static String mqttCurrentIpForTransport(const String& transport) {
+  if (transport == "gsm") {
+    if (!mqttTransportAllowsGsm()) return "";
+    if (!modemSerialReady || !modemReady || !gsmDataReady) return "";
     return modemIpToString();
   }
   return Ethernet.localIP().toString();
+}
+
+static String mqttCurrentIp() {
+  if (mqttEthConnectedSafe()) return mqttCurrentIpForTransport("ethernet");
+  if (mqttGsmConnectedSafe()) return mqttCurrentIpForTransport("gsm");
+  return mqttCurrentIpForTransport("ethernet");
 }
 
 static void mqttCfgToJson(String &out) {
@@ -1537,10 +1581,20 @@ static void mqttCfgToJson(String &out) {
   doc["apn"] = mqttCfg.apn;
   doc["gsm_user"] = mqttCfg.gsmUser;
   doc["gsm_pass"] = mqttCfg.gsmPass;
-  doc["connected"] = mqttClient.connected() ? 1 : 0;
-  doc["active_transport"] = mqttActiveTransport;
-  doc["active_host"] = mqttHostForTransport(mqttActiveTransport);
-  doc["active_port"] = mqttPortForTransport(mqttActiveTransport);
+  const bool ethConn = mqttEthConnectedSafe();
+  const bool gsmConn = mqttGsmConnectedSafe();
+  doc["connected"] = (ethConn || gsmConn) ? 1 : 0;
+  doc["eth_connected"] = ethConn ? 1 : 0;
+  doc["gsm_connected"] = gsmConn ? 1 : 0;
+  doc["active_transport"] = mqttActiveTransportText();
+  doc["active_host"] = mqttCfg.host;
+  doc["active_port"] = mqttCfg.port;
+  doc["eth_host"] = mqttCfg.host;
+  doc["eth_port"] = mqttCfg.port;
+  doc["gsm_host"] = mqttHostForTransport("gsm");
+  doc["gsm_port"] = mqttPortForTransport("gsm");
+  doc["eth_ip"] = mqttCurrentIpForTransport("ethernet");
+  doc["gsm_ip"] = mqttCurrentIpForTransport("gsm");
   doc["gsm_network"] = gsmNetworkReady ? 1 : 0;
   doc["gsm_data"] = gsmDataReady ? 1 : 0;
   serializeJsonPretty(doc, out);
@@ -1555,9 +1609,12 @@ static bool saveMqttCfg() {
 static bool loadMqttCfg() {
   String s = readFile("/mqtt.json");
   if (s.length() == 0) {
-    saveMqttCfg();
-    Serial.println("[MQTT] created default /mqtt.json");
-    return true;
+    if (saveMqttCfg()) {
+      Serial.println("[MQTT] created default /mqtt.json");
+      return true;
+    }
+    Serial.println("[MQTT] failed to create default /mqtt.json");
+    return false;
   }
   static JsonDocument doc;
   doc.clear();
@@ -1567,7 +1624,7 @@ static bool loadMqttCfg() {
     return false;
   }
   mqttCfg.enabled = (doc["enabled"] | 0) ? true : false;
-  mqttCfg.transport = normalizeMqttTransport(String((const char*)(doc["transport"] | "ethernet")));
+  mqttCfg.transport = normalizeMqttTransport(String((const char*)(doc["transport"] | "auto")));
   mqttCfg.host = String((const char*)(doc["host"] | "192.168.1.43"));
   mqttCfg.port = (uint16_t)(doc["port"] | 1883);
   mqttCfg.user = String((const char*)(doc["user"] | ""));
@@ -1604,8 +1661,26 @@ static bool loadMqttCfg() {
   return true;
 }
 
+static void mqttPublishToClient(PubSubClient &client, const String& topic, const String& payload, bool retain) {
+  if (&client == &mqttClientGsm) {
+    if (!mqttGsmConnectedSafe()) return;
+  } else {
+    if (!mqttEthConnectedSafe()) return;
+  }
+  client.publish(topic.c_str(), payload.c_str(), retain);
+}
+
+static void mqttPublishToTransport(const String& transport, const String& topic, const String& payload, bool retain) {
+  mqttPublishToClient(*mqttClientForTransport(transport), topic, payload, retain);
+}
+
 static void mqttPublish(const String& topic, const String& payload, bool retain) {
-  mqttClient.publish(topic.c_str(), payload.c_str(), retain);
+  mqttPublishToClient(mqttClientEth, topic, payload, retain);
+  mqttPublishToClient(mqttClientGsm, topic, payload, retain);
+}
+
+static void mqttPublishEthernetOnly(const String& topic, const String& payload, bool retain) {
+  mqttPublishToClient(mqttClientEth, topic, payload, retain);
 }
 
 static const char* relayModeText(int8_t mode) {
@@ -1614,8 +1689,8 @@ static const char* relayModeText(int8_t mode) {
   return "FORCE_OFF";
 }
 
-static bool mqttLowDataMode() {
-  return mqttActiveTransport == "gsm";
+static bool mqttLowDataTransport(const String& transport) {
+  return transport == "gsm";
 }
 
 static const char* mqttStateText(int rc) {
@@ -1711,8 +1786,9 @@ static String ruleSummaryShort(int relayIndex){
   return out;
 }
 
-static void mqttPublishDiscovery() {
-  if (!mqttClient.connected()) return;
+static void mqttPublishDiscovery(const String& transport) {
+  if (!mqttConnectedForTransport(transport)) return;
+  if (mqttLowDataTransport(transport)) return; // data-saver on GSM
   String base = mqttBaseTopic();
   String node = mqttNodeId();
   String avail = base + "/status";
@@ -1739,7 +1815,7 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/switch/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
 
     // Auto button to return relay to AUTO mode
     doc.clear();
@@ -1757,7 +1833,7 @@ static void mqttPublishDiscovery() {
     dev2["mf"] = "ESPRelay4";
     topic = mqttCfg.discoveryPrefix + "/button/" + uid + "_auto/config";
     serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
 
     // Rule summary sensor
     doc.clear();
@@ -1775,7 +1851,7 @@ static void mqttPublishDiscovery() {
     devr["mf"] = "ESPRelay4";
     topic = mqttCfg.discoveryPrefix + "/sensor/" + rid + "/config";
     serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
 
   // IP sensor
@@ -1794,7 +1870,7 @@ static void mqttPublishDiscovery() {
   devip["mf"] = "ESPRelay4";
   String ipTopic = mqttCfg.discoveryPrefix + "/sensor/" + ipId + "/config";
   String out; serializeJson(doc, out);
-  mqttPublish(ipTopic, out, true);
+  mqttPublishToTransport(transport, ipTopic, out, true);
 
   // WiFi AP enable switch
   doc.clear();
@@ -1815,7 +1891,7 @@ static void mqttPublishDiscovery() {
   devw["mf"] = "ESPRelay4";
   String wTopic = mqttCfg.discoveryPrefix + "/switch/" + wId + "/config";
   serializeJson(doc, out);
-  mqttPublish(wTopic, out, true);
+  mqttPublishToTransport(transport, wTopic, out, true);
 
   // BLE enable switch
   doc.clear();
@@ -1836,7 +1912,7 @@ static void mqttPublishDiscovery() {
   devb["mf"] = "ESPRelay4";
   String bTopic = mqttCfg.discoveryPrefix + "/switch/" + bId + "/config";
   serializeJson(doc, out);
-  mqttPublish(bTopic, out, true);
+  mqttPublishToTransport(transport, bTopic, out, true);
 
   for (int i = 0; i < totalInputs; i++) {
     doc.clear();
@@ -1856,7 +1932,7 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/binary_sensor/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
 
   // Virtual inputs (MQTT-driven) as switches
@@ -1879,7 +1955,7 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/switch/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
 
   for (int s = 0; s < shuttersLimit(); s++) {
@@ -1905,7 +1981,7 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/cover/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
 
   // Temperature sensors
@@ -1928,7 +2004,7 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/sensor/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
 
   if (dhtPresent) {
@@ -1950,7 +2026,7 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/sensor/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
   if (dhtPresent) {
     doc.clear();
@@ -1971,102 +2047,84 @@ static void mqttPublishDiscovery() {
     dev["mf"] = "ESPRelay4";
     String topic = mqttCfg.discoveryPrefix + "/sensor/" + uid + "/config";
     String out; serializeJson(doc, out);
-    mqttPublish(topic, out, true);
+    mqttPublishToTransport(transport, topic, out, true);
   }
 
-  mqttAnnounced = true;
+  if (transport == "gsm") mqttAnnouncedGsm = true;
+  else mqttAnnouncedEth = true;
 }
 
-static void mqttPublishAllState() {
-  if (!mqttClient.connected()) return;
+static void mqttPublishStateSnapshot(const String& transport, bool controlOnly) {
+  if (!mqttConnectedForTransport(transport)) return;
   String base = mqttBaseTopic();
-  mqttPublish(base + "/status", "online", true);
-  String ip = mqttCurrentIp();
-  mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
-  lastIpPub = ip;
-  mqttPublish(base + "/gsm/iccid", gsmLastCcid.length() ? gsmLastCcid : "-", mqttCfg.retain);
-  mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
-  lastWifiPub = wifiCfg.enabled;
-  mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
-  lastBlePub = bleEnabled;
-  for (int i = 0; i < totalRelays; i++) {
-    mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
-    lastRelaysPub[i] = relays[i];
-    mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
-    lastRelayModePub[i] = overrideRelay[i];
+  mqttPublishToTransport(transport, base + "/status", "online", true);
+  String ip = mqttCurrentIpForTransport(transport);
+  mqttPublishToTransport(transport, base + "/net/ip", ip, mqttCfg.retain);
+  if (transport == "gsm") lastIpPubGsm = ip;
+  else lastIpPubEth = ip;
+  mqttPublishToTransport(transport, base + "/gsm/iccid", gsmLastCcid.length() ? gsmLastCcid : "-", mqttCfg.retain);
+
+  if (!controlOnly) {
+    mqttPublishToTransport(transport, base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
+    lastWifiPub = wifiCfg.enabled;
+    mqttPublishToTransport(transport, base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
+    lastBlePub = bleEnabled;
   }
-  for (int i = 0; i < totalRelays; i++) {
-    String rs = ruleSummaryShort(i);
-    mqttPublish(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
-    lastRulePub[i] = rs;
-  }
+
   for (int i = 0; i < totalInputs; i++) {
-    mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
+    mqttPublishToTransport(transport, base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
     lastInputsPub[i] = inputs[i];
   }
   for (int i = 0; i < totalInputs; i++) {
-    mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
+    mqttPublishToTransport(transport, base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
     lastVirtualPub[i] = virtualInputs[i];
   }
-  for (int s = 0; s < shuttersLimit(); s++) {
-    if (!shCfg[s].enabled) continue;
-    const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
-    mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
-    lastShutterMove[s] = (int)shRt[s].move;
+  for (int i = 0; i < totalRelays; i++) {
+    mqttPublishToTransport(transport, base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
+    lastRelaysPub[i] = relays[i];
+    mqttPublishToTransport(transport, base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
+    lastRelayModePub[i] = overrideRelay[i];
   }
-  for (int i = 0; i < tempCount; i++) {
-    if (tempC[i] > -100.0f) {
-      mqttPublish(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
-      lastTempPub[i] = tempC[i];
+  if (!controlOnly) {
+    for (int i = 0; i < totalRelays; i++) {
+      String rs = ruleSummaryShort(i);
+      mqttPublishToTransport(transport, base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
+      lastRulePub[i] = rs;
     }
   }
-  if (dhtPresent && !isnan(dhtTempC)) {
-    mqttPublish(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
-    lastDhtPub = dhtTempC;
-  }
-  if (dhtPresent && !isnan(dhtHum)) {
-    mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
-    lastDhtHumPub = dhtHum;
-  }
-}
-
-static void mqttPublishControlState() {
-  if (!mqttClient.connected()) return;
-  String base = mqttBaseTopic();
-  mqttPublish(base + "/status", "online", true);
-  String ip = mqttCurrentIp();
-  mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
-  lastIpPub = ip;
-  mqttPublish(base + "/gsm/iccid", gsmLastCcid.length() ? gsmLastCcid : "-", mqttCfg.retain);
-  for (int i = 0; i < totalInputs; i++) {
-    mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
-    lastInputsPub[i] = inputs[i];
-  }
-  for (int i = 0; i < totalInputs; i++) {
-    mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
-    lastVirtualPub[i] = virtualInputs[i];
-  }
-  for (int i = 0; i < totalRelays; i++) {
-    mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
-    lastRelaysPub[i] = relays[i];
-    mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
-    lastRelayModePub[i] = overrideRelay[i];
-  }
   for (int s = 0; s < shuttersLimit(); s++) {
     if (!shCfg[s].enabled) continue;
     const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
-    mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
+    mqttPublishToTransport(transport, base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
     lastShutterMove[s] = (int)shRt[s].move;
+  }
+
+  if (!controlOnly) {
+    for (int i = 0; i < tempCount; i++) {
+      if (tempC[i] > -100.0f) {
+        mqttPublishToTransport(transport, base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
+        lastTempPub[i] = tempC[i];
+      }
+    }
+    if (dhtPresent && !isnan(dhtTempC)) {
+      mqttPublishToTransport(transport, base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
+      lastDhtPub = dhtTempC;
+    }
+    if (dhtPresent && !isnan(dhtHum)) {
+      mqttPublishToTransport(transport, base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
+      lastDhtHumPub = dhtHum;
+    }
   }
 }
 
-static void mqttCallback(char* topic, byte* payload, unsigned int length) {
+static void mqttHandleMessage(const char* source, char* topic, byte* payload, unsigned int length) {
   String t = String(topic);
   String p;
+  bool fastCommand = false;
   for (unsigned int i = 0; i < length; i++) p += (char)payload[i];
   p.trim();
   p.toUpperCase();
-  Serial.printf("[MQTT] RX topic=%s payload=%s\n", t.c_str(), p.c_str());
+  Serial.printf("[MQTT][%s] RX topic=%s payload=%s\n", source, t.c_str(), p.c_str());
 
   String base = mqttBaseTopic();
   if (t.startsWith(base + "/relay/") && t.endsWith("/auto")) {
@@ -2075,6 +2133,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       int i = idx - 1;
       if (!reservedByShutter[i]) {
         overrideRelay[i] = -1;
+        fastCommand = true;
       }
     }
   }
@@ -2093,9 +2152,9 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     int idx = t.substring((base + "/vin/").length()).toInt();
     if (idx >= 1 && idx <= totalInputs) {
       int i = idx - 1;
-      if (p == "ON") virtualInputs[i] = true;
-      else if (p == "OFF") virtualInputs[i] = false;
-      else if (p == "TOGGLE") virtualInputs[i] = !virtualInputs[i];
+      if (p == "ON") { virtualInputs[i] = true; fastCommand = true; }
+      else if (p == "OFF") { virtualInputs[i] = false; fastCommand = true; }
+      else if (p == "TOGGLE") { virtualInputs[i] = !virtualInputs[i]; fastCommand = true; }
     }
   }
   else if (t.startsWith(base + "/relay/") && t.endsWith("/set")) {
@@ -2103,211 +2162,278 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (idx >= 1 && idx <= totalRelays) {
       int i = idx - 1;
       if (!reservedByShutter[i]) {
-        if (p == "ON") overrideRelay[i] = 1;
-        else if (p == "OFF") overrideRelay[i] = 0;
-        else if (p == "AUTO") overrideRelay[i] = -1;
-        else if (p == "TOGGLE") overrideRelay[i] = (overrideRelay[i] == 1 ? 0 : 1);
+        if (p == "ON") { overrideRelay[i] = 1; fastCommand = true; }
+        else if (p == "OFF") { overrideRelay[i] = 0; fastCommand = true; }
+        else if (p == "AUTO") { overrideRelay[i] = -1; fastCommand = true; }
+        else if (p == "TOGGLE") { overrideRelay[i] = (overrideRelay[i] == 1 ? 0 : 1); fastCommand = true; }
       }
     }
   } else if (t.startsWith(base + "/shutter/") && t.endsWith("/set")) {
     int idx = t.substring((base + "/shutter/").length()).toInt();
     if (idx >= 1 && idx <= shuttersLimit()) {
       int s = idx - 1;
-      if (p == "OPEN" || p == "UP") shRt[s].manual = MC_UP;
-      else if (p == "CLOSE" || p == "DOWN") shRt[s].manual = MC_DOWN;
-      else if (p == "STOP") shRt[s].manual = MC_STOP;
+      if (p == "OPEN" || p == "UP") { shRt[s].manual = MC_UP; fastCommand = true; }
+      else if (p == "CLOSE" || p == "DOWN") { shRt[s].manual = MC_DOWN; fastCommand = true; }
+      else if (p == "STOP") { shRt[s].manual = MC_STOP; fastCommand = true; }
     }
   }
+  if (fastCommand) {
+    mqttFastCommandPending = true;
+    mqttFastModeUntilMs = millis() + 700;
+  }
+}
+
+static void mqttCallbackEth(char* topic, byte* payload, unsigned int length) {
+  mqttHandleMessage("ETH", topic, payload, length);
+}
+
+static void mqttCallbackGsm(char* topic, byte* payload, unsigned int length) {
+  mqttHandleMessage("GSM", topic, payload, length);
 }
 
 static void mqttSetup() {
   mqttCfg.transport = normalizeMqttTransport(mqttCfg.transport);
   mqttCfg.base = normalizeBaseTopic(mqttCfg.base);
-  mqttSwitchTransport(mqttSelectTransport());
-  mqttApplyServerForTransport(mqttActiveTransport);
-  mqttClient.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
-  mqttClient.setCallback(mqttCallback);
+  mqttApplyServerForTransport("ethernet");
+  mqttApplyServerForTransport("gsm");
+  mqttClientEth.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
+  mqttClientGsm.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
+  mqttClientEth.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
+  mqttClientGsm.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
+  mqttClientEth.setCallback(mqttCallbackEth);
+  mqttClientGsm.setCallback(mqttCallbackGsm);
 }
 
-static void mqttSubscribeTopics() {
+static void mqttSubscribeTopics(PubSubClient &client) {
   String base = mqttBaseTopic();
   for (int i = 1; i <= totalRelays; i++) {
-    mqttClient.subscribe((base + "/relay/" + String(i) + "/set").c_str());
-    mqttClient.subscribe((base + "/relay/" + String(i) + "/auto").c_str());
+    client.subscribe((base + "/relay/" + String(i) + "/set").c_str());
+    client.subscribe((base + "/relay/" + String(i) + "/auto").c_str());
   }
-  mqttClient.subscribe((base + "/wifi/ap/set").c_str());
-  mqttClient.subscribe((base + "/ble/set").c_str());
+  client.subscribe((base + "/wifi/ap/set").c_str());
+  client.subscribe((base + "/ble/set").c_str());
   for (int i = 1; i <= totalInputs; i++) {
-    mqttClient.subscribe((base + "/vin/" + String(i) + "/set").c_str());
+    client.subscribe((base + "/vin/" + String(i) + "/set").c_str());
   }
   for (int s = 1; s <= shuttersLimit(); s++) {
-    mqttClient.subscribe((base + "/shutter/" + String(s) + "/set").c_str());
+    client.subscribe((base + "/shutter/" + String(s) + "/set").c_str());
   }
+}
+
+static String mqttClientIdForTransport(const String& transport) {
+  String id = mqttNodeId();
+  if (transport == "gsm") {
+    const String suffix = "-gsm";
+    const size_t maxLen = 23;
+    if (id.length() + suffix.length() > maxLen) {
+      id.remove(maxLen - suffix.length());
+    }
+    id += suffix;
+  }
+  return id;
+}
+
+static bool mqttTryConnectTransport(const String& transport) {
+  if (transport == "gsm") {
+    if (!mqttTransportAllowsGsm()) return false;
+    if (mqttGsmConnectedSafe()) return true;
+  } else {
+    if (!mqttTransportAllowsEthernet()) return false;
+    if (mqttEthConnectedSafe()) return true;
+  }
+
+  PubSubClient *client = mqttClientForTransport(transport);
+
+  uint32_t now = millis();
+  if (transport == "gsm") {
+    if (now - mqttLastConnectGsmMs < 3000) return false;
+    mqttLastConnectGsmMs = now;
+  } else {
+    if (now - mqttLastConnectEthMs < 3000) return false;
+    mqttLastConnectEthMs = now;
+  }
+
+  if (transport == "ethernet") {
+    if (!mqttTransportAllowsEthernet()) return false;
+    if (Ethernet.linkStatus() != LinkON) return false;
+    if (!mqttShouldTryEthernetNow()) return false;
+  } else {
+    if (!mqttTransportAllowsGsm()) return false;
+    if (!gsmEnsureData()) {
+      Serial.println("[MQTT][GSM] skip connect: 1NCE not ready");
+      return false;
+    }
+  }
+
+  mqttApplyServerForTransport(transport);
+  String willTopic = mqttBaseTopic() + "/status";
+
+  const char* mqttHost = mqttHostForTransport(transport);
+  uint16_t mqttPort = mqttPortForTransport(transport);
+  String mqttHostStr = String(mqttHost);
+  String mqttUser = mqttUserForTransport(transport);
+  String mqttPass = mqttPassForTransport(transport);
+  if (transport == "gsm" && mqttHostLooksPrivateForGsm(mqttHostStr)) {
+    Serial.printf("[MQTT][GSM] WARN host '%s' semble prive, utiliser gsm_mqtt_host public\n", mqttHost);
+  }
+
+  String clientId = mqttClientIdForTransport(transport);
+  Serial.printf("[MQTT][%s] connect %s:%u client=%s\n",
+                (transport == "gsm") ? "GSM" : "ETH",
+                mqttHost, mqttPort, clientId.c_str());
+
+  bool ok = false;
+  if (mqttUser.length() > 0) {
+    ok = client->connect(clientId.c_str(), mqttUser.c_str(), mqttPass.c_str(),
+                         willTopic.c_str(), 0, true, "offline");
+  } else {
+    ok = client->connect(clientId.c_str(), willTopic.c_str(), 0, true, "offline");
+  }
+
+  if (ok) {
+    if (transport == "gsm") {
+      Serial.println("[MQTT][GSM] connected via modem");
+      gsmDebug1nce("mqtt_connected", true);
+    } else {
+      Serial.println("[MQTT][ETH] connected");
+      mqttLastEthFailMs = 0;
+      mqttLastEthFailRc = 0;
+      mqttEthAuthBlocked = false;
+    }
+    mqttSubscribeTopics(*client);
+    if (mqttLowDataTransport(transport)) {
+      Serial.println("[MQTT][GSM] low-data mode: publish control state only");
+      mqttPublishStateSnapshot(transport, true);
+      mqttAnnouncedGsm = true;
+      if (!mqttAnnouncedEth) {
+        Serial.println("[MQTT][GSM] discovery skipped (data saver)");
+      }
+    } else {
+      mqttPublishStateSnapshot(transport, false);
+      mqttPublishDiscovery(transport);
+    }
+    return true;
+  }
+
+  if (transport == "gsm" && !modem.isGprsConnected()) {
+    gsmDataReady = false;
+  }
+  if (transport == "gsm") gsmDebug1nce("mqtt_connect_fail", true);
+  int rc = client->state();
+  if (transport == "ethernet") {
+    mqttEth.stop(); // release W5500 socket immediately on failed MQTT connect
+    mqttLastEthFailMs = millis();
+    mqttLastEthFailRc = rc;
+    if (rc == 4 || rc == 5) {
+      if (!mqttEthAuthBlocked) {
+        Serial.println("[MQTT][ETH] auth rejected -> cooldown enabled");
+      }
+      mqttEthAuthBlocked = true;
+    }
+  }
+  Serial.printf("[MQTT][%s] connect failed rc=%d (%s)\n",
+                (transport == "gsm") ? "GSM" : "ETH",
+                rc, mqttStateText(rc));
+  return false;
 }
 
 static void mqttEnsureConnected() {
   if (!mqttCfg.enabled) return;
-  if (mqttClient.connected()) return;
-  uint32_t now = millis();
-  if (now - mqttLastConnectMs < 3000) return;
-  mqttLastConnectMs = now;
-
-  String desiredTransport = mqttDesiredTransport();
-  String preferredTransport = mqttSelectTransport();
-  bool gsmReadyChecked = false;
-  bool gsmReady = false;
-  String clientId = mqttNodeId();
-  String willTopic = mqttBaseTopic() + "/status";
-  auto attemptConnect = [&](const String& transport) -> bool {
-    mqttSwitchTransport(transport);
-    mqttApplyServerForTransport(transport);
-
-    if (transport == "gsm") {
-      if (!gsmReadyChecked) {
-        gsmReady = gsmEnsureData();
-        gsmReadyChecked = true;
-      }
-      if (!gsmReady) {
-        Serial.println("[MQTT][GSM] skip connect: 1NCE not ready");
-        return false;
-      }
-    }
-
-    const char* mqttHost = mqttHostForTransport(transport);
-    uint16_t mqttPort = mqttPortForTransport(transport);
-    String mqttHostStr = String(mqttHost);
-    String mqttUser = mqttUserForTransport(transport);
-    String mqttPass = mqttPassForTransport(transport);
-    if (transport == "gsm" && mqttHostLooksPrivateForGsm(mqttHostStr)) {
-      Serial.printf("[MQTT][GSM] WARN host '%s' semble prive, utiliser gsm_mqtt_host public\n", mqttHost);
-    }
-
-    Serial.printf("[MQTT] connect %s:%u client=%s via=%s\n",
-                  mqttHost, mqttPort, clientId.c_str(), mqttActiveTransport.c_str());
-    bool ok = false;
-    if (mqttUser.length() > 0) {
-      ok = mqttClient.connect(clientId.c_str(), mqttUser.c_str(), mqttPass.c_str(),
-                              willTopic.c_str(), 0, true, "offline");
-    } else {
-      ok = mqttClient.connect(clientId.c_str(), willTopic.c_str(), 0, true, "offline");
-    }
-
-    if (ok) {
-      if (transport == "gsm") {
-        Serial.println("[MQTT][GSM] connected via modem");
-      } else {
-        Serial.println("[MQTT][ETH] connected");
-        mqttLastEthFailMs = 0;
-        mqttLastEthFailRc = 0;
-        mqttEthAuthBlocked = false;
-      }
-      if (transport == "gsm") gsmDebug1nce("mqtt_connected", true);
-      mqttSubscribeTopics();
-      if (transport == "gsm") {
-        Serial.println("[MQTT][GSM] low-data mode: publish control state only");
-        mqttPublishControlState();
-        if (!mqttAnnounced) {
-          Serial.println("[MQTT][GSM] discovery skipped (data saver)");
-          mqttAnnounced = true;
-        }
-      } else {
-        mqttPublishAllState();
-        if (!mqttAnnounced) mqttPublishDiscovery();
-      }
-      return true;
-    }
-
-    if (transport == "gsm" && !modem.isGprsConnected()) {
-      gsmDataReady = false;
-    }
-    if (transport == "gsm") gsmDebug1nce("mqtt_connect_fail", true);
-    int rc = mqttClient.state();
-    if (transport == "ethernet") {
-      mqttLastEthFailMs = millis();
-      mqttLastEthFailRc = rc;
-      if (rc == 4 || rc == 5) {
-        if (!mqttEthAuthBlocked) {
-          Serial.println("[MQTT][ETH] auth rejected -> keep GSM until cooldown/config change");
-        }
-        mqttEthAuthBlocked = true;
-      }
-    }
-    Serial.printf("[MQTT] connect failed rc=%d (%s)\n", rc, mqttStateText(rc));
-    return false;
-  };
-
-  if (attemptConnect(preferredTransport)) return;
-
-  if (desiredTransport == "auto" && preferredTransport != "gsm" && mqttHasDedicatedGsmBroker()) {
-    Serial.println("[MQTT] local broker unavailable -> fallback GSM");
-    if (attemptConnect("gsm")) return;
-  } else {
-    if (desiredTransport == "auto" && preferredTransport != "gsm" && !mqttHasDedicatedGsmBroker()) {
-      Serial.println("[MQTT] no gsm_mqtt_host configured for fallback");
-    }
+  if (mqttTransportAllowsEthernet()) {
+    mqttTryConnectTransport("ethernet");
+  }
+  if (mqttTransportAllowsGsm()) {
+    mqttTryConnectTransport("gsm");
   }
 }
 
 static void mqttLoop() {
+  if (millis() < MQTT_STARTUP_GRACE_MS) {
+    if (!mqttStartupGraceLogged) {
+      Serial.printf("[MQTT] startup grace %lus: HTTP priority\n", (unsigned long)(MQTT_STARTUP_GRACE_MS / 1000));
+      mqttStartupGraceLogged = true;
+    }
+    return;
+  }
+
   if (!mqttCfg.enabled) {
     if (!mqttDisabledWarned) {
       Serial.println("[MQTT] disabled in config -> no connection attempt");
       mqttDisabledWarned = true;
     }
-    if (mqttClient.connected()) mqttClient.disconnect();
+    if (mqttEthConnectedSafe()) mqttClientEth.disconnect();
+    if (mqttGsmConnectedSafe()) mqttClientGsm.disconnect();
     return;
   }
   mqttDisabledWarned = false;
 
-  // Runtime failover/failback while already connected.
-  String selectedTransport = mqttSelectTransport();
-  if (mqttClient.connected() && selectedTransport != mqttActiveTransport) {
-    Serial.printf("[MQTT] switch transport %s -> %s (eth_link=%d)\n",
-                  mqttActiveTransport.c_str(),
-                  selectedTransport.c_str(),
-                  (Ethernet.linkStatus() == LinkON) ? 1 : 0);
-    mqttSwitchTransport(selectedTransport);
-    mqttLastConnectMs = 0; // reconnect immediately after switch
+  bool ethConn = mqttEthConnectedSafe();
+  bool gsmConn = mqttGsmConnectedSafe();
+
+  if (!mqttTransportAllowsEthernet() && ethConn) {
+    mqttClientEth.disconnect();
+    ethConn = false;
+  }
+  if (!mqttTransportAllowsGsm() && gsmConn) {
+    mqttClientGsm.disconnect();
+    gsmConn = false;
   }
 
   mqttEnsureConnected();
-  mqttClient.loop();
+  ethConn = mqttEthConnectedSafe();
+  gsmConn = mqttGsmConnectedSafe();
+  if (ethConn) mqttClientEth.loop();
+  if (gsmConn) mqttClientGsm.loop();
 
-  if (mqttActiveTransport == "gsm") {
-    gsmDebug1nce(mqttClient.connected() ? "loop" : "mqtt_disconnected", false);
+  if (mqttTransportAllowsGsm()) {
+    gsmDebug1nce(gsmConn ? "loop" : "mqtt_disconnected", false);
   }
 
-  if (!mqttClient.connected()) return;
+  // Prioritize command actuation over telemetry flood.
+  if (mqttFastCommandPending || millis() < mqttFastModeUntilMs) return;
 
-  if (!mqttAnnounced && !mqttLowDataMode()) {
-    mqttPublishDiscovery();
+  if (!ethConn && !gsmConn) return;
+
+  if (ethConn && !mqttAnnouncedEth) {
+    mqttPublishDiscovery("ethernet");
   }
 
   String base = mqttBaseTopic();
-  if (!mqttLowDataMode()) {
-    String ip = mqttCurrentIp();
-    if(ip != lastIpPub){
-      mqttPublish(base + "/net/ip", ip, mqttCfg.retain);
-      lastIpPub = ip;
+  if (ethConn) {
+    String ipEth = mqttCurrentIpForTransport("ethernet");
+    if(ipEth != lastIpPubEth){
+      mqttPublishToTransport("ethernet", base + "/net/ip", ipEth, mqttCfg.retain);
+      lastIpPubEth = ipEth;
     }
+  }
+  if (gsmConn) {
+    String ipGsm = mqttCurrentIpForTransport("gsm");
+    if(ipGsm != lastIpPubGsm){
+      mqttPublishToTransport("gsm", base + "/net/ip", ipGsm, mqttCfg.retain);
+      lastIpPubGsm = ipGsm;
+    }
+  }
+
+  if (ethConn) {
     if(wifiCfg.enabled != lastWifiPub){
-      mqttPublish(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
+      mqttPublishEthernetOnly(base + "/wifi/ap/state", wifiCfg.enabled ? "ON" : "OFF", mqttCfg.retain);
       lastWifiPub = wifiCfg.enabled;
     }
     if(bleEnabled != lastBlePub){
-      mqttPublish(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
+      mqttPublishEthernetOnly(base + "/ble/state", bleEnabled ? "ON" : "OFF", mqttCfg.retain);
       lastBlePub = bleEnabled;
     }
-    static uint32_t lastRuleCheckMs = 0;
-    const uint32_t now = millis();
-    if(now - lastRuleCheckMs > 2000){
-      lastRuleCheckMs = now;
-      for (int i = 0; i < totalRelays; i++) {
-        String rs = ruleSummaryShort(i);
-        if(rs != lastRulePub[i]){
-          mqttPublish(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
-          lastRulePub[i] = rs;
-        }
+  }
+
+  static uint32_t lastRuleCheckMs = 0;
+  const uint32_t now = millis();
+  if (ethConn && (now - lastRuleCheckMs > 2000)) {
+    lastRuleCheckMs = now;
+    for (int i = 0; i < totalRelays; i++) {
+      String rs = ruleSummaryShort(i);
+      if(rs != lastRulePub[i]){
+        mqttPublishEthernetOnly(base + "/rule/relay/" + String(i+1), rs, mqttCfg.retain);
+        lastRulePub[i] = rs;
       }
     }
   }
@@ -2343,23 +2469,23 @@ static void mqttLoop() {
     }
   }
 
-  if (!mqttLowDataMode()) {
+  if (ethConn) {
     for (int i = 0; i < tempCount; i++) {
       if (fabs(tempC[i] - lastTempPub[i]) >= 0.1f) {
-        mqttPublish(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
+        mqttPublishEthernetOnly(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
         lastTempPub[i] = tempC[i];
       }
     }
 
     if (dhtPresent && !isnan(dhtTempC)) {
       if (isnan(lastDhtPub) || fabs(dhtTempC - lastDhtPub) >= 0.1f) {
-        mqttPublish(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
+        mqttPublishEthernetOnly(base + "/temp/dht/state", String(dhtTempC, 2), mqttCfg.retain);
         lastDhtPub = dhtTempC;
       }
     }
     if (dhtPresent && !isnan(dhtHum)) {
       if (isnan(lastDhtHumPub) || fabs(dhtHum - lastDhtHumPub) >= 0.5f) {
-        mqttPublish(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
+        mqttPublishEthernetOnly(base + "/hum/dht/state", String(dhtHum, 1), mqttCfg.retain);
         lastDhtHumPub = dhtHum;
       }
     }
@@ -2740,18 +2866,45 @@ static void buildFinalRelays() {
 // HTTP helpers
 // ===============================================================
 static String readLine(Client& c){
+  static const uint32_t HTTP_IO_TIMEOUT_MS = 800;
   String s;
-  while(c.connected()){
+  uint32_t lastRxMs = millis();
+  while(c.connected() || c.available()){
     if(c.available()){
       char ch = c.read();
       if(ch=='\n') break;
       if(ch!='\r') s += ch;
+      lastRxMs = millis();
+    } else {
+      if ((millis() - lastRxMs) > HTTP_IO_TIMEOUT_MS) break;
+      delay(1);
     }
   }
   return s;
 }
 
 static void sendText(Client& c, const String& body, const char* ctype, int code);
+
+static bool clientWriteAll(Client& c, const uint8_t* data, size_t len, uint32_t timeoutMs){
+  size_t off = 0;
+  uint32_t lastProgress = millis();
+  while (off < len) {
+    int w = c.write(data + off, len - off);
+    if (w > 0) {
+      off += (size_t)w;
+      lastProgress = millis();
+      continue;
+    }
+    if ((millis() - lastProgress) > timeoutMs) return false;
+    delay(1);
+  }
+  return true;
+}
+
+static bool clientWriteString(Client& c, const String& s, uint32_t timeoutMs){
+  if (s.length() == 0) return true;
+  return clientWriteAll(c, (const uint8_t*)s.c_str(), s.length(), timeoutMs);
+}
 
 static String base64Decode(const String& in){
   static int8_t table[256];
@@ -2799,31 +2952,48 @@ static void sendAuthRequired(Client& c){
 }
 
 static String readBody(Client& c, int len){
+  static const uint32_t HTTP_IO_TIMEOUT_MS = 2000;
   String b; b.reserve(len);
+  uint32_t lastRxMs = millis();
   while(len-- > 0){
-    while(!c.available()) delay(1);
+    while(!c.available()){
+      if (!c.connected() || (millis() - lastRxMs) > HTTP_IO_TIMEOUT_MS) {
+        return b;
+      }
+      delay(1);
+    }
     b += (char)c.read();
+    lastRxMs = millis();
   }
   return b;
 }
 
 static void sendText(Client& c, const String& body, const char* ctype, int code=200){
-  if(code==200) c.println("HTTP/1.1 200 OK");
-  else if(code==401) c.println("HTTP/1.1 401 Unauthorized");
-  else if(code==204) c.println("HTTP/1.1 204 No Content");
-  else if(code==400) c.println("HTTP/1.1 400 Bad Request");
-  else if(code==404) c.println("HTTP/1.1 404 Not Found");
-  else c.println("HTTP/1.1 500 Internal Server Error");
+  String status = "HTTP/1.1 500 Internal Server Error";
+  if(code==200) status = "HTTP/1.1 200 OK";
+  else if(code==401) status = "HTTP/1.1 401 Unauthorized";
+  else if(code==204) status = "HTTP/1.1 204 No Content";
+  else if(code==400) status = "HTTP/1.1 400 Bad Request";
+  else if(code==404) status = "HTTP/1.1 404 Not Found";
 
-  c.print("Content-Type: "); c.println(ctype);
-  c.println("Connection: close");
-  c.print("Content-Length: "); c.println(body.length());
-  c.println();
-  c.print(body);
+  String hdr = status + "\r\n";
+  hdr += "Content-Type: ";
+  hdr += ctype;
+  hdr += "\r\n";
+  hdr += "Connection: close\r\n";
+  hdr += "Content-Length: " + String(body.length()) + "\r\n\r\n";
+  if (!clientWriteString(c, hdr, 4000)) {
+    return;
+  }
+  if (body.length() > 0) {
+    clientWriteAll(c, (const uint8_t*)body.c_str(), body.length(), 4000);
+  }
+  c.flush();
+  delay(2);
 }
 
 static void buildStateJson(String &out){
-  static JsonDocument doc;
+  static StaticJsonDocument<4096> doc;
   doc.clear();
   JsonArray inA = doc["inputs"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
@@ -2854,14 +3024,17 @@ static void buildStateJson(String &out){
   wifi["enabled"] = wifiCfg.enabled ? 1 : 0;
   wifi["ap"] = wifiApOn ? 1 : 0;
   wifi["ssid"] = wifiCfg.ssid;
-  wifi["pass"] = wifiCfg.pass;
   wifi["ip"] = wifiApOn ? WiFi.softAPIP().toString() : "";
 
   JsonObject mq = doc["mqtt"].to<JsonObject>();
   mq["enabled"] = mqttCfg.enabled ? 1 : 0;
-  mq["connected"] = mqttClient.connected() ? 1 : 0;
+  const bool ethConn = mqttEthConnectedSafe();
+  const bool gsmConn = mqttGsmConnectedSafe();
+  mq["connected"] = (ethConn || gsmConn) ? 1 : 0;
+  mq["eth_connected"] = ethConn ? 1 : 0;
+  mq["gsm_connected"] = gsmConn ? 1 : 0;
   mq["transport"] = normalizeMqttTransport(mqttCfg.transport);
-  mq["active_transport"] = mqttActiveTransport;
+  mq["active_transport"] = mqttActiveTransportText();
   mq["gsm_network"] = gsmNetworkReady ? 1 : 0;
   mq["gsm_data"] = gsmDataReady ? 1 : 0;
   mq["ip"] = mqttCurrentIp();
@@ -2911,7 +3084,9 @@ static void buildStateJson(String &out){
   if(strlen(FW_TAG) > 0) doc["fw_tag"] = FW_TAG;
   doc["uptime_ms"] = (uint32_t)millis();
 
-  serializeJson(doc, out);
+  if (serializeJson(doc, out) == 0) {
+    out = "{}";
+  }
 }
 
 static void sendJsonState(Client& c){
@@ -2948,9 +3123,13 @@ static void buildStateJsonBle(String &out){
 
   JsonObject mq = doc["mqtt"].to<JsonObject>();
   mq["enabled"] = mqttCfg.enabled ? 1 : 0;
-  mq["connected"] = mqttClient.connected() ? 1 : 0;
-  mq["active_transport"] = mqttActiveTransport;
-  mq["on_gsm"] = (mqttActiveTransport == "gsm") ? 1 : 0;
+  const bool ethConn = mqttEthConnectedSafe();
+  const bool gsmConn = mqttGsmConnectedSafe();
+  mq["connected"] = (ethConn || gsmConn) ? 1 : 0;
+  mq["eth_connected"] = ethConn ? 1 : 0;
+  mq["gsm_connected"] = gsmConn ? 1 : 0;
+  mq["active_transport"] = mqttActiveTransportText();
+  mq["on_gsm"] = gsmConn ? 1 : 0;
 
   JsonObject gsm = doc["gsm"].to<JsonObject>();
   gsm["modem_ready"] = modemReady ? 1 : 0;
@@ -3039,7 +3218,7 @@ static void sendJsonBackup(Client& c){
   sendText(c, out, "application/json");
 }
 
-static bool applyNetFromJson(JsonObject o, String &err) {
+static bool parseNetFromJson(JsonObject o, NetConfig &nextCfg, String &err) {
   const char* mode = o["mode"] | "static";
   bool dhcp = (strcmp(mode, "dhcp") == 0);
   if(!(dhcp || strcmp(mode, "static")==0)){
@@ -3047,6 +3226,7 @@ static bool applyNetFromJson(JsonObject o, String &err) {
     return false;
   }
 
+  nextCfg = netCfg;
   if(!dhcp){
     IPAddress ip, gw, sn, dns;
     bool ok = true;
@@ -3062,14 +3242,24 @@ static bool applyNetFromJson(JsonObject o, String &err) {
       err = "net invalid ip fields";
       return false;
     }
-    netCfg.ip = ip;
-    netCfg.gw = gw;
-    netCfg.sn = sn;
-    netCfg.dns = dns;
+    nextCfg.ip = ip;
+    nextCfg.gw = gw;
+    nextCfg.sn = sn;
+    nextCfg.dns = dns;
   }
 
-  netCfg.dhcp = dhcp;
+  nextCfg.dhcp = dhcp;
+  return true;
+}
+
+static bool applyNetFromJson(JsonObject o, String &err) {
+  NetConfig nextCfg;
+  if(!parseNetFromJson(o, nextCfg, err)) return false;
+
+  NetConfig prevCfg = netCfg;
+  netCfg = nextCfg;
   if(!saveNetCfg()){
+    netCfg = prevCfg;
     err = "net fs write failed";
     return false;
   }
@@ -3111,7 +3301,7 @@ static bool applyWifiFromJson(JsonObject o, String &err, bool &restarting) {
   return true;
 }
 
-static bool applyMqttFromJson(JsonObject o, String &err) {
+static bool parseMqttFromJson(JsonObject o, MqttConfig &nextCfg, String &err) {
   int port = (int)(o["port"] | 1883);
   if (port < 1 || port > 65535) {
     err = "mqtt.port out of range";
@@ -3123,38 +3313,37 @@ static bool applyMqttFromJson(JsonObject o, String &err) {
     return false;
   }
 
-  mqttCfg.enabled = (o["enabled"] | 0) ? true : false;
-  mqttCfg.transport = normalizeMqttTransport(String((const char*)(o["transport"] | "ethernet")));
-  mqttCfg.host = String((const char*)(o["host"] | "192.168.1.43"));
-  mqttCfg.port = (uint16_t)port;
-  mqttCfg.user = String((const char*)(o["user"] | ""));
-  mqttCfg.pass = String((const char*)(o["pass"] | ""));
-  mqttCfg.gsmMqttHost = String((const char*)(o["gsm_mqtt_host"] | ""));
-  mqttCfg.gsmMqttPort = (uint16_t)gsmMqttPort;
-  mqttCfg.gsmMqttUser = String((const char*)(o["gsm_mqtt_user"] | ""));
-  mqttCfg.gsmMqttPass = String((const char*)(o["gsm_mqtt_pass"] | ""));
-  mqttCfg.clientId = String((const char*)(o["client_id"] | "ESPRelay4"));
-  mqttCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "esprelay4")));
-  mqttCfg.discoveryPrefix = String((const char*)(o["discovery_prefix"] | "homeassistant"));
-  mqttCfg.retain = (o["retain"] | 1) ? true : false;
-  mqttCfg.apn = String((const char*)(o["apn"] | GPRS_DEFAULT_APN));
-  mqttCfg.gsmUser = String((const char*)(o["gsm_user"] | GPRS_DEFAULT_USER));
-  mqttCfg.gsmPass = String((const char*)(o["gsm_pass"] | GPRS_DEFAULT_PASS));
-  mqttCfg.host.trim();
-  if (mqttCfg.host.length() == 0) {
+  nextCfg.enabled = (o["enabled"] | 0) ? true : false;
+  nextCfg.transport = normalizeMqttTransport(String((const char*)(o["transport"] | "auto")));
+  nextCfg.host = String((const char*)(o["host"] | "192.168.1.43"));
+  nextCfg.port = (uint16_t)port;
+  nextCfg.user = String((const char*)(o["user"] | ""));
+  nextCfg.pass = String((const char*)(o["pass"] | ""));
+  nextCfg.gsmMqttHost = String((const char*)(o["gsm_mqtt_host"] | ""));
+  nextCfg.gsmMqttPort = (uint16_t)gsmMqttPort;
+  nextCfg.gsmMqttUser = String((const char*)(o["gsm_mqtt_user"] | ""));
+  nextCfg.gsmMqttPass = String((const char*)(o["gsm_mqtt_pass"] | ""));
+  nextCfg.clientId = String((const char*)(o["client_id"] | "ESPRelay4"));
+  nextCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "esprelay4")));
+  nextCfg.discoveryPrefix = String((const char*)(o["discovery_prefix"] | "homeassistant"));
+  nextCfg.retain = (o["retain"] | 1) ? true : false;
+  nextCfg.apn = String((const char*)(o["apn"] | GPRS_DEFAULT_APN));
+  nextCfg.gsmUser = String((const char*)(o["gsm_user"] | GPRS_DEFAULT_USER));
+  nextCfg.gsmPass = String((const char*)(o["gsm_pass"] | GPRS_DEFAULT_PASS));
+  nextCfg.host.trim();
+  if (nextCfg.host.length() == 0) {
     err = "mqtt.host required";
     return false;
   }
-  mqttCfg.gsmMqttHost.trim();
-  if (mqttCfg.gsmMqttHost.length() > 0 && mqttCfg.gsmMqttPort == 0) {
-    mqttCfg.gsmMqttPort = 1883;
+  nextCfg.gsmMqttHost.trim();
+  if (nextCfg.gsmMqttHost.length() > 0 && nextCfg.gsmMqttPort == 0) {
+    nextCfg.gsmMqttPort = 1883;
   }
-  mqttCfg.apn.trim();
+  nextCfg.apn.trim();
+  return true;
+}
 
-  if(!saveMqttCfg()){
-    err = "mqtt fs write failed";
-    return false;
-  }
+static void mqttOnConfigApplied() {
   gsmMarkDown();
   modemReady = false;
   modemPowerKickDone = false;
@@ -3165,10 +3354,29 @@ static bool applyMqttFromJson(JsonObject o, String &err) {
   gsmLastTryMs = 0;
   gsmLastDebugMs = 0;
   mqttSetup();
-  mqttAnnounced = false;
+  mqttAnnouncedEth = false;
+  mqttAnnouncedGsm = false;
+  mqttLastConnectEthMs = 0;
+  mqttLastConnectGsmMs = 0;
+  lastIpPubEth = "";
+  lastIpPubGsm = "";
   mqttLastEthFailMs = 0;
   mqttLastEthFailRc = 0;
   mqttEthAuthBlocked = false;
+}
+
+static bool applyMqttFromJson(JsonObject o, String &err) {
+  MqttConfig nextCfg;
+  if(!parseMqttFromJson(o, nextCfg, err)) return false;
+
+  MqttConfig prevCfg = mqttCfg;
+  mqttCfg = nextCfg;
+  if(!saveMqttCfg()){
+    mqttCfg = prevCfg;
+    err = "mqtt fs write failed";
+    return false;
+  }
+  mqttOnConfigApplied();
   return true;
 }
 
@@ -3239,6 +3447,8 @@ static bool handleOtaStream(Client& c, int contentLen, bool isFs, const String& 
 
 static void ethernetPrintInfo() {
   Serial.println("\n[ETH] Ethernet status");
+  Serial.printf("  MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   Serial.print("  IP: "); Serial.println(Ethernet.localIP());
   Serial.print("  GW: "); Serial.println(Ethernet.gatewayIP());
   Serial.print("  MASK: "); Serial.println(Ethernet.subnetMask());
@@ -3345,6 +3555,31 @@ static bool validateAndApplyRulesDoc(JsonDocument &candidate, String &errMsg) {
   return true;
 }
 
+static bool validateRulesDocNoSideEffects(JsonDocument &candidate, String &errMsg) {
+  ShutterCfg shCfgBackup[SHUTTER_MAX];
+  ShutterRuntime shRtBackup[SHUTTER_MAX];
+  bool reservedBackup[MAX_RELAYS];
+
+  for(int i=0; i<SHUTTER_MAX; i++){
+    shCfgBackup[i] = shCfg[i];
+    shRtBackup[i] = shRt[i];
+  }
+  for(int i=0; i<MAX_RELAYS; i++){
+    reservedBackup[i] = reservedByShutter[i];
+  }
+
+  bool ok = validateAndApplyRulesDoc(candidate, errMsg);
+
+  for(int i=0; i<SHUTTER_MAX; i++){
+    shCfg[i] = shCfgBackup[i];
+    shRt[i] = shRtBackup[i];
+  }
+  for(int i=0; i<MAX_RELAYS; i++){
+    reservedByShutter[i] = reservedBackup[i];
+  }
+  return ok;
+}
+
 static void rebuildRuntimeFromRules() {
   // parse shutter & reservations from current rulesDoc
   String err;
@@ -3354,15 +3589,18 @@ static void rebuildRuntimeFromRules() {
     for(int s=0; s<shuttersLimit(); s++) shCfg[s].enabled = false;
     applyReservationsFromConfig();
   }
-  mqttAnnounced = false;
+  mqttAnnouncedEth = false;
 }
 
 // ===============================================================
 // HTTP router
 // ===============================================================
-static void handleHttpClient(Client& client){
+static void handleHttpClient(Client& client, bool fromWifi=false){
   String req = readLine(client); // "GET /path HTTP/1.1"
-  if(req.length()==0){ client.stop(); return; }
+  if(req.length()==0){
+    client.stop();
+    return;
+  }
 
   int contentLen = 0;
   String authHeader = "";
@@ -3389,6 +3627,12 @@ static void handleHttpClient(Client& client){
 
   int sp1 = req.indexOf(' ');
   int sp2 = req.indexOf(' ', sp1+1);
+  if (sp1 <= 0 || sp2 <= sp1) {
+    sendText(client, "bad request\n", "text/plain", 400);
+    delay(1);
+    client.stop();
+    return;
+  }
   String method = req.substring(0, sp1);
   String url = req.substring(sp1+1, sp2);
 
@@ -3399,7 +3643,7 @@ static void handleHttpClient(Client& client){
   const bool authed = checkAuthHeader(authHeader);
 
   // -------- routes --------
-  if(method=="GET" && path=="/"){
+  if(method=="GET" && (path=="/" || path=="/index.html")){
     sendFile(client, "/index.html", "text/html; charset=utf-8");
   }
   else if(method=="GET" && (path=="/i18n_en.json" || path=="/i18n_fr.json")){
@@ -3581,31 +3825,78 @@ static void handleHttpClient(Client& client){
       if(!tmp["rules"].is<JsonObject>() || !tmp["net"].is<JsonObject>() || !tmp["mqtt"].is<JsonObject>()){
         sendText(client, String("{\"ok\":false,\"error\":\"backup must contain rules, net, mqtt\"}"), "application/json", 400);
       } else {
-        String msg;
+        String msg, errMsg;
         JsonDocument rulesTmp;
         rulesTmp.set(tmp["rules"]);
-        if(!validateAndApplyRulesDoc(rulesTmp, msg)){
+        NetConfig netNext;
+        MqttConfig mqttNext;
+        if(!validateRulesDocNoSideEffects(rulesTmp, msg)){
           JsonDocument e;
           e["ok"]=false; e["error"]=msg;
           String out; serializeJson(e,out);
           sendText(client, out, "application/json", 400);
+        } else if(!parseNetFromJson(tmp["net"].as<JsonObject>(), netNext, errMsg)){
+          sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+        } else if(!parseMqttFromJson(tmp["mqtt"].as<JsonObject>(), mqttNext, errMsg)){
+          sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
         } else {
+          // Snapshot current state for rollback in case one FS write fails.
+          JsonDocument rulesPrev;
+          rulesPrev.set(rulesDoc);
+          NetConfig netPrev = netCfg;
+          MqttConfig mqttPrev = mqttCfg;
+
+          bool ok = true;
+          String commitErr;
+
           rulesDoc.clear();
           rulesDoc.set(rulesTmp);
           rebuildRuntimeFromRules();
           if(!saveRulesToFS(rulesDoc)){
-            sendText(client, String("{\"ok\":false,\"error\":\"rules fs write failed\"}"), "application/json", 500);
-          } else {
-            String errMsg;
-            if(!applyNetFromJson(tmp["net"].as<JsonObject>(), errMsg)){
-              sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
-            } else if(!applyMqttFromJson(tmp["mqtt"].as<JsonObject>(), errMsg)){
-              sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
+            ok = false;
+            commitErr = "rules fs write failed";
+          }
+
+          if(ok){
+            netCfg = netNext;
+            if(!saveNetCfg()){
+              ok = false;
+              commitErr = "net fs write failed";
             } else {
-              sendText(client, String("{\"ok\":true,\"applied\":true,\"reboot\":true}"), "application/json");
-              delay(200);
-              ESP.restart();
+              applyNetCfg();
             }
+          }
+
+          if(ok){
+            mqttCfg = mqttNext;
+            if(!saveMqttCfg()){
+              ok = false;
+              commitErr = "mqtt fs write failed";
+            } else {
+              mqttOnConfigApplied();
+            }
+          }
+
+          if(!ok){
+            // Rollback all configs to keep backup restore coherent.
+            rulesDoc.clear();
+            rulesDoc.set(rulesPrev);
+            saveRulesToFS(rulesDoc);
+            rebuildRuntimeFromRules();
+
+            netCfg = netPrev;
+            saveNetCfg();
+            applyNetCfg();
+
+            mqttCfg = mqttPrev;
+            saveMqttCfg();
+            mqttOnConfigApplied();
+
+            sendText(client, String("{\"ok\":false,\"error\":\"") + commitErr + "\"}", "application/json", 500);
+          } else {
+            sendText(client, String("{\"ok\":true,\"applied\":true,\"reboot\":true}"), "application/json");
+            delay(200);
+            ESP.restart();
           }
         }
       }
@@ -3621,7 +3912,7 @@ static void handleHttpClient(Client& client){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
       String msg;
-      if(!validateAndApplyRulesDoc(tmp, msg)){
+      if(!validateRulesDocNoSideEffects(tmp, msg)){
         JsonDocument e;
         e["ok"]=false; e["error"]=msg;
         String out; serializeJson(e,out);
@@ -3704,7 +3995,7 @@ static void handleHttpClient(Client& client){
       }
     }
   }
-  else if(method=="GET" && wifiApOn && (
+  else if(method=="GET" && fromWifi && wifiApOn && (
       path=="/generate_204" || path=="/gen_204" ||
       path=="/hotspot-detect.html" || path=="/success.txt" ||
       path=="/ncsi.txt" || path=="/connecttest.txt"
@@ -3716,7 +4007,7 @@ static void handleHttpClient(Client& client){
     client.println();
   }
   else{
-    if(wifiApOn && method=="GET" && !path.startsWith("/api") && path != "/i18n_en.json" && path != "/i18n_fr.json"){
+    if(fromWifi && wifiApOn && method=="GET" && !path.startsWith("/api") && path != "/i18n_en.json" && path != "/i18n_fr.json"){
       client.println("HTTP/1.1 302 Found");
       client.print("Location: http://"); client.print(WiFi.softAPIP().toString()); client.println("/");
       client.println("Cache-Control: no-cache");
@@ -3727,18 +4018,22 @@ static void handleHttpClient(Client& client){
     }
   }
 
-  delay(1);
+  delay(5);
   client.stop();
 }
 
 static void handleHttp(){
   EthernetClient ethClient = server.available();
-  if(ethClient) handleHttpClient(ethClient);
+  if(ethClient) {
+    handleHttpClient(ethClient, false);
+  }
 
   if(wifiApOn){
     wifiDns.processNextRequest();
     WiFiClient wifiClient = wifiServer.available();
-    if(wifiClient) handleHttpClient(wifiClient);
+    if(wifiClient) {
+      handleHttpClient(wifiClient, true);
+    }
   }
 }
 
@@ -3780,9 +4075,11 @@ void setup() {
   Serial.printf("[I2C] SDA=%d SCL=%d\n", I2C_SDA, I2C_SCL);
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
+  Wire.setTimeOut(20); // avoid long blocking I2C calls that can starve HTTP loop
 
   // 1-Wire temp sensors
   tempSensors.begin();
+  tempSensors.setWaitForConversion(false); // avoid blocking up to ~750ms per request
   tempCount = tempSensors.getDeviceCount();
   if(tempCount > TEMP_MAX_SENSORS) tempCount = TEMP_MAX_SENSORS;
   for (uint8_t i = 0; i < tempCount; i++) {
@@ -3825,11 +4122,15 @@ void setup() {
                 mqttCfg.port,
                 mqttCfg.gsmMqttHost.length() ? mqttCfg.gsmMqttHost.c_str() : "-",
                 mqttCfg.gsmMqttPort);
-  gsmLastTryMs = 0; // force immediate first attempt
-  if (gsmEnsureData()) {
-    Serial.println("[GSM] startup 1NCE: connected");
+  if (mqttTransportAllowsGsm()) {
+    gsmLastTryMs = 0; // force immediate first attempt
+    if (gsmEnsureData()) {
+      Serial.println("[GSM] startup 1NCE: connected");
+    } else {
+      Serial.println("[GSM] startup 1NCE: failed");
+    }
   } else {
-    Serial.println("[GSM] startup 1NCE: failed");
+    Serial.println("[GSM] startup skipped (transport mode)");
   }
   mqttSetup();
 
@@ -3838,6 +4139,20 @@ void setup() {
 }
 
 void loop() {
+  // Serve HTTP first to keep UI/API responsive even if other tasks slow down.
+  handleHttp();
+
+  // Process MQTT early so incoming commands are applied in the same loop cycle.
+  mqttLoop();
+  if (mqttFastCommandPending) {
+    // Fast path: apply command immediately, then continue normal cycle.
+    shutterTick();
+    evalSimpleRules();
+    buildFinalRelays();
+    pcaApplyRelays();
+    mqttFastCommandPending = false;
+  }
+
   // read inputs early to update module status before serving HTTP
   pcaReadInputs();
   debounceInputs();
@@ -3847,7 +4162,6 @@ void loop() {
     combinedInputs[i] = inputs[i] || virtualInputs[i];
   }
 
-  handleHttp();
   updateWifiState();
   heartbeatTick();
   bleTick();
@@ -3865,7 +4179,7 @@ void loop() {
   // apply outputs
   pcaApplyRelays();
 
-  // Temperature polling (non-blocking-ish)
+  // Temperature polling
   if(millis() - lastTempReadMs > 5000){
     lastTempReadMs = millis();
     if(tempCount > 0){
@@ -3875,24 +4189,31 @@ void loop() {
         tempC[i] = c;
       }
     }
-    float dhtC = dht.readTemperature();
-    float dhtH = dht.readHumidity();
-    if(!isnan(dhtC) || !isnan(dhtH)){
-      if(!dhtPresent) mqttAnnounced = false;
-      if(!dhtPresent) Serial.println("[DHT] detected");
-      dhtPresent = true;
-      if(!isnan(dhtC)) dhtTempC = dhtC;
-      if(!isnan(dhtH)) dhtHum = dhtH;
-      dhtCheckDone = true;
-    } else if(!dhtCheckDone) {
-      Serial.println("[DHT] not detected");
-      dhtCheckDone = true;
+    // DHT reads can block when sensor is absent; once not detected, probe only occasionally.
+    const uint32_t nowMs = millis();
+    const bool shouldProbeDht = dhtPresent || !dhtCheckDone || nowMs >= dhtNextProbeMs;
+    if (shouldProbeDht) {
+      float dhtC = dht.readTemperature();
+      float dhtH = dht.readHumidity();
+      if(!isnan(dhtC) || !isnan(dhtH)){
+        if(!dhtPresent) mqttAnnouncedEth = false;
+        if(!dhtPresent) Serial.println("[DHT] detected");
+        dhtPresent = true;
+        if(!isnan(dhtC)) dhtTempC = dhtC;
+        if(!isnan(dhtH)) dhtHum = dhtH;
+        dhtCheckDone = true;
+        dhtNextProbeMs = nowMs + 5000;
+      } else {
+        if(!dhtCheckDone) {
+          Serial.println("[DHT] not detected");
+          dhtCheckDone = true;
+        }
+        if (!dhtPresent) {
+          dhtNextProbeMs = nowMs + 60000;
+        }
+      }
     }
   }
-
-  // MQTT
-  mqttLoop();
-
 
   // update prev inputs for edge-based rules/toggle/pulse
   for(int k=0;k<totalInputs;k++){
@@ -3916,5 +4237,5 @@ void loop() {
   }
   */
 
-  delay(10);
+  delay(2);
 }

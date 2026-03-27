@@ -177,7 +177,8 @@
   <!-- PROGRAMMATION -->
   <div id="tab-prog" class="hide">
     <div class="inline" style="margin:8px 0 12px 0;">
-      <button class="primary" onclick="saveRules()" data-i18n="programming.save_rules">Save rules</button>
+      <button class="primary" id="rules_save_btn" onclick="saveRules()" data-i18n="programming.save_rules">Save rules</button>
+      <span class="muted" id="rules_hint"></span>
     </div>
 
     <div class="card" style="margin-bottom:12px">
@@ -208,7 +209,8 @@
         <input id="auth_new_pass" type="password">
       </div>
       <div class="inline" style="margin-top:8px;">
-        <button class="primary" onclick="saveAuth()" data-i18n="setup.save">Save</button>
+        <button class="primary" id="auth_save_btn" onclick="saveAuth()" data-i18n="setup.save">Save</button>
+        <span class="muted" id="auth_hint"></span>
       </div>
     </div>
 
@@ -235,8 +237,9 @@
       </div>
 
       <div class="sep"></div>
-      <button class="primary" onclick="saveNet()" data-i18n="network.save">Save network</button>
-      <span class="muted" id="net_hint"></span>
+      <button class="primary" id="net_save_btn" onclick="saveNet()" data-i18n="network.save">Save network</button>
+      <span class="muted" id="net_mode_hint"></span>
+      <span class="muted" id="net_action_hint"></span>
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
@@ -270,25 +273,30 @@
     </div>
 
     <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="mqtt.title">MQTT / Home Assistant</h3>
-      <div class="muted" data-i18n="mqtt.desc">Broker + topics configuration. Home Assistant auto-discovery.</div>
+      <h3 data-i18n="mqtt.title">MQTT</h3>
+      <div class="muted" data-i18n="mqtt.desc">Broker + transport configuration.</div>
       <div class="sep"></div>
-
-      <div class="inline">
-        <span id="mqtt_status" class="pill">MQTT: ?</span>
-      </div>
 
       <div class="inline">
         <label><input id="mqtt_enabled" type="checkbox"> <span data-i18n="mqtt.enable">Enable MQTT</span></label>
       </div>
 
-      <div class="form-grid" style="margin-top:8px;">
+      <div class="inline" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.transport">Transport</span>
         <select id="mqtt_transport">
           <option value="ethernet" data-i18n="mqtt.transport_ethernet">Ethernet</option>
           <option value="gsm" data-i18n="mqtt.transport_gsm">GSM (A7670)</option>
-          <option value="auto" data-i18n="mqtt.transport_auto">Auto (ETH->GSM)</option>
+          <option value="auto" selected data-i18n="mqtt.transport_auto">Auto (ETH->GSM)</option>
         </select>
+      </div>
+      <div class="sep"></div>
+      <h3 data-i18n="mqtt.section_ha">Home Assistant discovery</h3>
+      <div class="muted" data-i18n="mqtt.section_ha_desc">Optional Home Assistant integration settings.</div>
+      <div class="inline" style="margin-top:8px;">
+        <span id="mqtt_status" class="pill">MQTT: ?</span>
+      </div>
+
+      <div class="form-grid" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.broker">Broker</span>
         <input id="mqtt_host" type="text" placeholder="192.168.1.43">
         <span class="muted" data-i18n="mqtt.port">Port</span>
@@ -301,6 +309,10 @@
         <input id="mqtt_client" type="text" placeholder="ESPRelay4">
         <span class="muted" data-i18n="mqtt.base_topic">Base topic</span>
         <input id="mqtt_base" type="text" placeholder="esprelay4">
+      </div>
+
+      <div class="sep"></div>
+      <div class="form-grid" style="margin-top:8px;">
         <span class="muted" data-i18n="mqtt.discovery_prefix">Discovery prefix</span>
         <input id="mqtt_disc" type="text" placeholder="homeassistant">
       </div>
@@ -334,7 +346,7 @@
       </div>
 
       <div class="sep"></div>
-      <button class="primary" onclick="saveMqtt()" data-i18n="mqtt.save">Save MQTT</button>
+      <button class="primary" id="mqtt_save_btn" onclick="saveMqtt()" data-i18n="mqtt.save">Save MQTT</button>
       <span class="muted" id="mqtt_hint"></span>
     </div>
 
@@ -530,9 +542,14 @@ window.logout = ()=>{
 
 window.saveAuth = async ()=>{
   if(!requireAuth()) return;
+  const saveBtn = $("auth_save_btn");
+  if(saveBtn) saveBtn.disabled = true;
+  setActionHint("auth_hint", t("setup.saving","Saving..."), "muted");
   const user = $("auth_new_user").value.trim();
   const pass = $("auth_new_pass").value;
   if(!user || !pass){
+    setActionHint("auth_hint", t("toast.auth_required","User/pass required"), "err", 6000);
+    if(saveBtn) saveBtn.disabled = false;
     toast(t("toast.auth_required","User/pass required"), false);
     return;
   }
@@ -544,8 +561,12 @@ window.saveAuth = async ()=>{
     localStorage.setItem("auth_pass", authPass);
     setAuthState(true, user);
     toast(t("toast.auth_saved","Credentials saved"));
+    setActionHint("auth_hint", t("toast.auth_saved","Credentials saved"), "ok", 5000);
   }catch(e){
+    setActionHint("auth_hint", e.message || t("setup.save_failed","Save failed"), "err", 8000);
     toast(e.message, false);
+  } finally {
+    if(saveBtn) saveBtn.disabled = false;
   }
 };
 
@@ -594,7 +615,38 @@ async function apiJson(path, opts){
   options.headers = Object.assign({}, inOpts.headers || {});
   const auth = authHeader();
   if(auth && !options.headers.Authorization) options.headers.Authorization = auth;
-  const r = await fetch(path, options);
+  const method = String(options.method || "GET").toUpperCase();
+  const timeoutMs = Number(options.timeoutMs || 3500);
+  const retries = Number(options.retries ?? (method === "GET" ? 1 : 0));
+  delete options.timeoutMs;
+  delete options.retries;
+
+  async function fetchWithTimeout(){
+    const ctl = new AbortController();
+    const t = setTimeout(()=>ctl.abort(), timeoutMs);
+    try{
+      return await fetch(path, Object.assign({}, options, {signal: ctl.signal}));
+    }finally{
+      clearTimeout(t);
+    }
+  }
+
+  let r, lastErr = null;
+  for(let attempt=0; attempt<=retries; attempt++){
+    try{
+      r = await fetchWithTimeout();
+      lastErr = null;
+      break;
+    }catch(e){
+      lastErr = e;
+      const transient = e && (e.name === "AbortError" || e.name === "TypeError");
+      if(!transient || attempt >= retries){
+        throw e;
+      }
+      await new Promise(res=>setTimeout(res, 120 * (attempt + 1)));
+    }
+  }
+  if(lastErr) throw lastErr;
   const ct = r.headers.get("content-type") || "";
   const raw = await r.text();
   if(!r.ok){
@@ -644,7 +696,7 @@ const putNet = (body)=>apiJson("/api/net",{method:"PUT",headers:{"Content-Type":
 const getWifi = ()=>apiJson("/api/wifi");
 const putWifi = (body)=>apiJson("/api/wifi",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const getMqtt = ()=>apiJson("/api/mqtt");
-const putMqtt = (body)=>apiJson("/api/mqtt",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const putMqtt = (body)=>apiJson("/api/mqtt",{method:"PUT",timeoutMs:10000,retries:1,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const getBackup = ()=>apiJson("/api/backup");
 const putBackup = (body)=>apiJson("/api/backup",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const putAuth = (body)=>apiJson("/api/auth",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -662,13 +714,37 @@ let lastUptimeMs = null;
 let lastUptimeChangeMs = 0;
 let lastStateFetchMs = 0;
 let shutterActionInFlight = false;
+let stateFetchBusy = false;
+let apiWriteInFlight = false;
+const actionHintHoldUntilMs = {};
+
+function setActionHint(id, text, kind="muted", holdMs=0){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = text || "";
+  el.classList.remove("ok","err","muted");
+  el.classList.add(kind);
+  if(holdMs > 0) actionHintHoldUntilMs[id] = Date.now() + holdMs;
+}
+
+function canOverwriteActionHint(id){
+  return Date.now() >= (actionHintHoldUntilMs[id] || 0);
+}
+
+function setMqttHint(text, kind="muted", holdMs=0){
+  setActionHint("mqtt_hint", text, kind, holdMs);
+}
+
+function canOverwriteMqttHint(){
+  return canOverwriteActionHint("mqtt_hint");
+}
 
 function updateHeartbeatIndicator(){
   const dot = document.querySelector(".hb-dot");
   if(!dot) return;
   const now = Date.now();
-  const staleFetch = lastStateFetchMs === 0 ? true : (now - lastStateFetchMs > 2000);
-  const staleUptime = lastUptimeChangeMs === 0 ? true : (now - lastUptimeChangeMs > 2000);
+  const staleFetch = lastStateFetchMs === 0 ? true : (now - lastStateFetchMs > 6000);
+  const staleUptime = lastUptimeChangeMs === 0 ? true : (now - lastUptimeChangeMs > 6000);
   if(staleFetch || staleUptime) dot.classList.add("offline");
   else dot.classList.remove("offline");
 }
@@ -814,7 +890,10 @@ function ruleCard(i, r, isShutterRelay){
 
       <div class="hr"></div>
 
-      <button class="small" onclick="applyOne(${i})" ${isShutterRelay ? "disabled" : ""}>${tf("rule.apply",{n:i+1},"Apply R{n}")}</button>
+      <div class="inline">
+        <button class="small" id="rule_apply_btn_${i}" onclick="applyOne(${i})" ${isShutterRelay ? "disabled" : ""}>${tf("rule.apply",{n:i+1},"Apply R{n}")}</button>
+        <span class="muted" id="rule_hint_${i}"></span>
+      </div>
     </div>
   `;
 }
@@ -850,13 +929,21 @@ window.onFieldChanged = (ev)=>{
 };
 window.applyOne = async (i)=>{
   if(!requireAuth()) return;
+  const hintId = `rule_hint_${i}`;
+  const btn = $(`rule_apply_btn_${i}`);
+  if(btn) btn.disabled = true;
+  setActionHint(hintId, t("rule.applying","Applying..."), "muted");
   try{
     normalizeRelayExpr(i);
     await putRules(rules);
     toast(tf("toast.rule_applied",{n:i+1},"Rules applied (R{n})"));
     await loadRules();
+    setActionHint(hintId, tf("toast.rule_applied",{n:i+1},"Rules applied (R{n})"), "ok", 5000);
   }catch(e){
+    setActionHint(hintId, e.message || t("rule.apply_failed","Apply failed"), "err", 8000);
     toast(e.message, false);
+  } finally {
+    if(btn) btn.disabled = false;
   }
 };
 
@@ -957,7 +1044,8 @@ function renderShutterCards(){
         </div>
 
         <div class="sep"></div>
-        <button class="primary" onclick="applyShutter(${i})">${t("shutter.add_update","Add / Update")}</button>
+        <button class="primary" id="shutter_apply_btn_${i}" onclick="applyShutter(${i})">${t("shutter.add_update","Add / Update")}</button>
+        <span class="muted" id="shutter_hint_${i}"></span>
         <button class="small" onclick="removeShutter(${i}, this)">${t("shutter.remove","Remove shutter")}</button>
       </div>
     `);
@@ -1017,10 +1105,15 @@ function setUIFromShutter(idx, sh){
 
 async function applyShutter(idx){
   if(!requireAuth()) return;
+  const hintId = `shutter_hint_${idx}`;
+  const btn = $(`shutter_apply_btn_${idx}`);
+  if(btn) btn.disabled = true;
+  setActionHint(hintId, t("shutter.saving","Saving..."), "muted");
   try{
     if(idx >= maxShutters()) return;
     const sh = shutterFromUI(idx);
     if(sh.up_relay === sh.down_relay){
+      setActionHint(hintId, t("toast.shutter_same_relay","UP relay and DOWN relay must be different"), "err", 7000);
       toast(t("toast.shutter_same_relay","UP relay and DOWN relay must be different"), false);
       return;
     }
@@ -1030,8 +1123,12 @@ async function applyShutter(idx){
     await putRules(rules);
     toast(t("toast.shutter_saved","Shutter added / updated"));
     await loadRules();
+    setActionHint(hintId, t("toast.shutter_saved","Shutter added / updated"), "ok", 5000);
   }catch(e){
+    setActionHint(hintId, e.message || t("shutter.save_failed","Save failed"), "err", 8000);
     toast(e.message, false);
+  } finally {
+    if(btn) btn.disabled = false;
   }
 }
 async function removeShutter(idx, btn){
@@ -1318,7 +1415,7 @@ function updateNetUiState(){
   ["net_ip","net_gw","net_sn","net_dns"].forEach(id=>{
     $(id).disabled = dhcp;
   });
-  $("net_hint").textContent = dhcp ? t("network.dhcp_enabled","DHCP enabled") : "";
+  $("net_mode_hint").textContent = dhcp ? t("network.dhcp_enabled","DHCP enabled") : "";
 }
 
 function readNetUI(){
@@ -1346,13 +1443,20 @@ async function loadNet(){
 
 async function saveNet(){
   if(!requireAuth()) return;
+  const saveBtn = $("net_save_btn");
+  if(saveBtn) saveBtn.disabled = true;
+  setActionHint("net_action_hint", t("network.saving","Saving network..."), "muted");
   try{
     const body = readNetUI();
     await putNet(body);
     toast(t("toast.net_saved","Network saved"));
     await loadNet();
+    setActionHint("net_action_hint", t("toast.net_saved","Network saved"), "ok", 5000);
   }catch(e){
+    setActionHint("net_action_hint", e.message || t("network.save_failed","Save failed"), "err", 8000);
     toast(e.message, false);
+  } finally {
+    if(saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -1426,19 +1530,41 @@ async function saveWifiPass(){
 
 // -------- MQTT config --------
 function setMqttStatusLabels(cfg){
-  const status = cfg.connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
-  const via = (cfg.active_transport || cfg.transport || "ethernet").toUpperCase();
-  $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status} (${via})`;
+  const selected = String(cfg.transport || "auto").toLowerCase();
+  const hasEth = cfg.eth_connected !== undefined;
+  const hasGsm = cfg.gsm_connected !== undefined;
+  const ethConnected = !!cfg.eth_connected;
+  const gsmDataUp = (cfg.gsm_data === undefined) ? true : !!cfg.gsm_data;
+  const gsmConnected = (!!cfg.gsm_connected) && gsmDataUp;
 
-  const activeLower = String(cfg.active_transport || cfg.transport || "").toLowerCase();
-  const gsmConnected = !!cfg.connected && activeLower === "gsm";
+  let connected = !!cfg.connected;
+  let via = (cfg.active_transport || cfg.transport || "auto").toUpperCase();
+
+  if(hasEth || hasGsm){
+    if(selected === "gsm"){
+      connected = gsmConnected;
+      via = "GSM";
+    } else if(selected === "ethernet"){
+      connected = ethConnected;
+      via = "ETH";
+    } else {
+      connected = ethConnected || gsmConnected;
+      if(ethConnected && gsmConnected) via = "ETH+GSM";
+      else if(ethConnected) via = "ETH";
+      else if(gsmConnected) via = "GSM";
+      else via = "AUTO";
+    }
+  }
+
+  const status = connected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
+  $("mqtt_status").textContent = `${t("mqtt.status","MQTT")}: ${status} (${via})`;
   const gsmStatus = gsmConnected ? t("mqtt.connected","Connected") : t("mqtt.disconnected","Disconnected");
   if($("mqtt_gsm_status")) $("mqtt_gsm_status").textContent = `${t("mqtt.gsm_status","MQTT GSM")}: ${gsmStatus}`;
 }
 
 function setMqttUI(cfg){
   $("mqtt_enabled").checked = !!cfg.enabled;
-  $("mqtt_transport").value = cfg.transport || "ethernet";
+  $("mqtt_transport").value = cfg.transport || "auto";
   $("mqtt_host").value = cfg.host || "192.168.1.43";
   $("mqtt_port").value = cfg.port || 1883;
   $("mqtt_user").value = cfg.user || "";
@@ -1455,7 +1581,9 @@ function setMqttUI(cfg){
   $("mqtt_gsm_pass").value = cfg.gsm_pass || "";
   $("mqtt_retain").checked = cfg.retain !== 0;
   setMqttStatusLabels(cfg);
-  $("mqtt_hint").textContent = cfg.enabled ? "" : t("mqtt.disabled","MQTT disabled");
+  if(canOverwriteMqttHint()){
+    setMqttHint(cfg.enabled ? "" : t("mqtt.disabled","MQTT disabled"), "muted");
+  }
   mqttDirty = false;
 }
 
@@ -1464,7 +1592,7 @@ function readMqttUI(){
   const gsmPort = gsmPortRaw === "" ? 0 : Number(gsmPortRaw);
   return {
     enabled: $("mqtt_enabled").checked ? 1 : 0,
-    transport: $("mqtt_transport").value || "ethernet",
+    transport: $("mqtt_transport").value || "auto",
     host: $("mqtt_host").value.trim(),
     port: Number($("mqtt_port").value||1883),
     user: $("mqtt_user").value.trim(),
@@ -1491,10 +1619,10 @@ async function loadMqtt(){
       mqttCfg = {
         enabled:0, host:"192.168.1.43", port:1883, user:"", pass:"",
         client_id:"ESPRelay4", base:"esprelay4", discovery_prefix:"homeassistant", retain:1,
-        transport:"ethernet",
+        transport:"auto",
         gsm_mqtt_host:"", gsm_mqtt_port:0, gsm_mqtt_user:"", gsm_mqtt_pass:"",
         apn:"iot.1nce.net", gsm_user:"", gsm_pass:"",
-        active_transport:"ethernet"
+        active_transport:"auto"
       };
     }
     if(!mqttDirty) setMqttUI(mqttCfg);
@@ -1506,23 +1634,35 @@ async function loadMqtt(){
     if(mqttCfg){
       setMqttStatusLabels(mqttCfg);
     } else {
-      const fallback = {connected:0, active_transport:"ethernet", transport:"ethernet"};
+      const fallback = {connected:0, active_transport:"auto", transport:"auto"};
       setMqttStatusLabels(fallback);
     }
-    if($("mqtt_hint")) $("mqtt_hint").textContent = t("toast.mqtt_unavailable","GET /api/mqtt unavailable");
+    if(canOverwriteMqttHint()){
+      setMqttHint(t("toast.mqtt_unavailable","GET /api/mqtt unavailable"), "err", 5000);
+    }
   }
 }
 
 async function saveMqtt(){
   if(!requireAuth()) return;
+  apiWriteInFlight = true;
+  const saveBtn = $("mqtt_save_btn");
+  if(saveBtn) saveBtn.disabled = true;
+  setMqttHint(t("mqtt.saving","Saving MQTT..."), "muted");
   try{
     const body = readMqttUI();
     await putMqtt(body);
     toast(t("toast.mqtt_saved","MQTT saved"));
     mqttDirty = false;
+    await new Promise(res=>setTimeout(res, 250));
     await loadMqtt();
+    setMqttHint(t("toast.mqtt_saved","MQTT saved"), "ok", 5000);
   }catch(e){
     toast(e.message, false);
+    setMqttHint(e.message || t("mqtt.save_failed","Save failed"), "err", 8000);
+  }finally{
+    if(saveBtn) saveBtn.disabled = false;
+    apiWriteInFlight = false;
   }
 }
 
@@ -1673,29 +1813,40 @@ async function loadRules(){
 
 async function saveRules(){
   if(!requireAuth()) return;
+  const saveBtn = $("rules_save_btn");
+  if(saveBtn) saveBtn.disabled = true;
+  setActionHint("rules_hint", t("rules.saving","Saving rules..."), "muted");
   try{
     // normaliser toutes les expressions avant envoi
     for(let i=0;i<rules.relays.length;i++) normalizeRelayExpr(i);
     await putRules(rules);
     toast(t("toast.rules_saved","Rules saved"));
     await loadRules();
+    setActionHint("rules_hint", t("toast.rules_saved","Rules saved"), "ok", 5000);
   }catch(e){
+    setActionHint("rules_hint", e.message || t("rules.save_failed","Save failed"), "err", 8000);
     toast(e.message, false);
+  } finally {
+    if(saveBtn) saveBtn.disabled = false;
   }
 }
 
 // -------- Live refresh --------
 async function refreshState(){
+  if(stateFetchBusy || apiWriteInFlight) return;
+  stateFetchBusy = true;
   try{
     const s = await getState();
     lastStateFetchMs = Date.now();
     renderState(s);
   }catch(e){
     $("net").textContent = "NET: ?";
+  }finally{
+    stateFetchBusy = false;
   }
 }
 
-setInterval(refreshState, 600);
+setInterval(refreshState, 1500);
 setInterval(updateHeartbeatIndicator, 500);
 async function init(){
   await loadLang(lang);
@@ -1707,9 +1858,10 @@ async function init(){
   refreshState();
   if(isAuthed){ loadNet(); loadMqtt(); loadWifi(); }
   setInterval(()=>{
+    if(apiWriteInFlight) return;
     const setupTab = $("tab-setup");
     if(setupTab && !setupTab.classList.contains("hide")) loadMqtt();
-  }, 5000);
+  }, 7000);
 }
 init();
 </script>
