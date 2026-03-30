@@ -367,6 +367,95 @@ class _BleHomePageState extends State<BleHomePage> {
     );
   }
 
+  Widget _mqttTopicsCard({
+    required String baseTopic,
+    required int relayCount,
+    required int inputCount,
+    required int shutterCount,
+  }) {
+    final safeRelays = relayCount > 0 ? relayCount : 1;
+    final safeInputs = inputCount > 0 ? inputCount : 1;
+    final safeShutters = shutterCount > 0 ? shutterCount : 1;
+    final topicsPub = <String>[
+      '$baseTopic/status',
+      '$baseTopic/net/ip',
+      '$baseTopic/gsm/iccid',
+      '$baseTopic/relay/<1..$safeRelays>/state',
+      '$baseTopic/relay/<1..$safeRelays>/mode',
+      '$baseTopic/input/<1..$safeInputs>/state',
+      '$baseTopic/vin/<1..$safeInputs>/state',
+      '$baseTopic/shutter/<1..$safeShutters>/state',
+      '$baseTopic/wifi/ap/state',
+      '$baseTopic/ble/state',
+      '$baseTopic/rule/relay/<1..$safeRelays>',
+      '$baseTopic/temp/<1..N>/state',
+      '$baseTopic/temp/dht/state',
+      '$baseTopic/hum/dht/state',
+    ];
+    final topicsSub = <String>[
+      '$baseTopic/relay/<1..$safeRelays>/set',
+      '$baseTopic/relay/<1..$safeRelays>/auto',
+      '$baseTopic/vin/<1..$safeInputs>/set',
+      '$baseTopic/shutter/<1..$safeShutters>/set',
+      '$baseTopic/wifi/ap/set',
+      '$baseTopic/ble/set',
+    ];
+
+    Widget section(String title, List<String> items) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          ...items.map((t) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: SelectableText(
+                  t,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    height: 1.2,
+                  ),
+                ),
+              )),
+        ],
+      );
+    }
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: Colors.black12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Topics MQTT (carte connectee)',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            SelectableText(
+              'Base: $baseTopic',
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 10),
+            section('Publies (device -> broker)', topicsPub),
+            const SizedBox(height: 10),
+            section('Souscrits (broker -> device)', topicsSub),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _led(bool on) {
     return Container(
       width: 12,
@@ -391,6 +480,12 @@ class _BleHomePageState extends State<BleHomePage> {
     final ethLink = ethLinkKnown ? ((eth['link'] ?? 0) == 1) : true;
     final mqtt = _state['mqtt'] is Map ? _state['mqtt'] as Map : {};
     final gsm = _state['gsm'] is Map ? _state['gsm'] as Map : {};
+    final deviceId =
+        _toStr(_state['device_id'], _toStr(mqtt['device_id'], '--'));
+    final mqttBase = _toStr(
+      mqtt['base_effective'],
+      deviceId != '--' ? 'espr4/$deviceId' : 'espr4',
+    );
     final mqttConnected = _toInt(mqtt['connected']) == 1;
     final activeTransport = _toStr(mqtt['active_transport'], '--');
     final onGsm = _toInt(mqtt['on_gsm']) == 1;
@@ -411,6 +506,14 @@ class _BleHomePageState extends State<BleHomePage> {
     final bleError = _toStr(_state['error'], '');
     final activeTransportLower = activeTransport.toLowerCase();
     final mqttOnGsmNow = onGsm || activeTransportLower == 'gsm';
+    final mqttType = switch (activeTransportLower) {
+      'ethernet' => 'ETH',
+      'gsm' => 'GSM',
+      'ethernet+gsm' => 'ETH+GSM',
+      _ => activeTransport.toUpperCase(),
+    };
+    final mqttLabel =
+        mqttConnected ? 'MQTT ON $mqttType' : 'MQTT OFF $mqttType';
     final signalLevel =
         gsmCsq < 0 ? 0 : (gsmCsq >= 20 ? 1 : (gsmCsq >= 10 ? 2 : 3));
 
@@ -429,6 +532,17 @@ class _BleHomePageState extends State<BleHomePage> {
     final inPer = (_state['inputs_per'] is num)
         ? (_state['inputs_per'] as num).toInt()
         : 4;
+    final totalRelays = (_state['total_relays'] is num)
+        ? (_state['total_relays'] as num).toInt()
+        : (relays.isNotEmpty ? relays.length : modules * per);
+    final totalInputs = (_state['total_inputs'] is num)
+        ? (_state['total_inputs'] as num).toInt()
+        : (inputs.isNotEmpty ? inputs.length : modules * inPer);
+    final shutters = (_state['shutters'] is List)
+        ? (_state['shutters'] as List)
+        : const <dynamic>[];
+    final totalShutters =
+        shutters.isNotEmpty ? shutters.length : (totalRelays ~/ 2);
 
     final cards = <Widget>[];
     for (int m = 0; m < modules; m++) {
@@ -506,9 +620,9 @@ class _BleHomePageState extends State<BleHomePage> {
       children: [
         _statusCard('Connectivite', [
           _chip('ETH ${ethLink ? "UP" : "DOWN"}', level: ethLink ? 1 : 3),
-          _chip('ETH IP $ethIp', level: ethIp == '--' ? 2 : 4),
-          _chip('MQTT ${mqttConnected ? "ON" : "OFF"}',
-              level: mqttConnected ? 1 : 3),
+          _chip('IP $ethIp', level: ethIp == '--' ? 2 : 4),
+          _chip(mqttLabel, level: mqttConnected ? 1 : 3),
+          if (deviceId != '--') _chip('MQTT ID $deviceId', level: 4),
           _chip('Transport ${activeTransport.toUpperCase()}',
               level: mqttOnGsmNow ? 4 : 0),
         ]),
@@ -545,6 +659,12 @@ class _BleHomePageState extends State<BleHomePage> {
         const SizedBox(height: 12),
         ...cards.map((c) =>
             Padding(padding: const EdgeInsets.only(bottom: 12), child: c)),
+        _mqttTopicsCard(
+          baseTopic: mqttBase,
+          relayCount: totalRelays,
+          inputCount: totalInputs,
+          shutterCount: totalShutters,
+        ),
       ],
     );
   }

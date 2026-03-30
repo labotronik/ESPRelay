@@ -138,6 +138,9 @@ static bool saveBleCfg();
 static bool loadBleCfg();
 static bool clientWriteAll(Client& c, const uint8_t* data, size_t len, uint32_t timeoutMs = 1500);
 static bool clientWriteString(Client& c, const String& s, uint32_t timeoutMs = 1500);
+static String mqttDeviceId();
+static String mqttBaseTopic();
+static String mqttNodeId();
 
 static String macHex12Upper(){
   uint64_t mac64 = ESP.getEfuseMac();
@@ -151,6 +154,10 @@ static String macHex12Upper(){
   char buf[13];
   snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X", b[0], b[1], b[2], b[3], b[4], b[5]);
   return String(buf);
+}
+
+static String mqttDeviceId() {
+  return macHex12Upper();
 }
 
 static void buildBleUuids(){
@@ -241,8 +248,8 @@ static MqttConfig mqttCfg = {
   0,                       // gsmMqttPort: port broker dedie GSM
   String(""),              // gsmMqttUser: identifiant MQTT dedie GSM
   String(""),              // gsmMqttPass: mot de passe MQTT dedie GSM
-  String("ESPRelay4"),     // clientId: identifiant client MQTT
-  String("esprelay4"),     // base: topic racine
+  String(""),              // clientId: legacy UI field (runtime id = MAC12)
+  String("espr4"),         // base: topic racine
   String("homeassistant"), // discoveryPrefix: prefix Home Assistant discovery
   true,                    // retain: publier les etats avec le flag retain
   String(GPRS_DEFAULT_APN),   // apn: APN data pour connexion GSM
@@ -1118,7 +1125,9 @@ static String normalizeBaseTopic(const String& in) {
   String t = in;
   t.trim();
   if (t.endsWith("/")) t.remove(t.length()-1);
-  if (t.length() == 0) t = "esprelay4";
+  if (t.length() == 0) t = "espr4";
+  // Legacy migration: previous default base was "esprelay4".
+  if (t.equalsIgnoreCase("esprelay4")) t = "espr4";
   return t;
 }
 
@@ -1126,7 +1135,7 @@ static String normalizeMqttTransport(const String& in) {
   String t = in;
   t.trim();
   t.toLowerCase();
-  if (t == "gsm" || t == "auto") return t;
+  if (t == "ethernet" || t == "gsm" || t == "auto") return t;
   return "auto";
 }
 
@@ -1146,6 +1155,7 @@ static bool mqttShouldTryEthernetNow() {
 }
 
 static bool mqttHasDedicatedGsmBroker();
+static bool mqttHostLooksPrivateForGsm(const String& host);
 
 static bool mqttHasDedicatedGsmBroker() {
   return mqttCfg.gsmMqttHost.length() > 0;
@@ -1159,7 +1169,13 @@ static bool mqttTransportAllowsGsm() {
   String desired = mqttDesiredTransport();
   if (desired == "gsm") return true;
   // Le mode double client ETH+GSM est active en mode auto avec broker GSM dedie.
-  if (desired == "auto") return mqttHasDedicatedGsmBroker();
+  if (desired == "auto") {
+    if (mqttHasDedicatedGsmBroker()) return true;
+    // Fallback auto: if ETH auth is rejected (rc=4/5), allow GSM only when
+    // the primary host is publicly reachable (not RFC1918/local).
+    if (mqttEthAuthBlocked && !mqttHostLooksPrivateForGsm(mqttCfg.host)) return true;
+    return false;
+  }
   return false;
 }
 
@@ -1574,8 +1590,10 @@ static void mqttCfgToJson(String &out) {
   doc["gsm_mqtt_port"] = mqttCfg.gsmMqttPort;
   doc["gsm_mqtt_user"] = mqttCfg.gsmMqttUser;
   doc["gsm_mqtt_pass"] = mqttCfg.gsmMqttPass;
-  doc["client_id"] = mqttCfg.clientId;
+  doc["client_id"] = mqttNodeId();
+  doc["device_id"] = mqttDeviceId();
   doc["base"] = mqttCfg.base;
+  doc["base_effective"] = mqttBaseTopic();
   doc["discovery_prefix"] = mqttCfg.discoveryPrefix;
   doc["retain"] = mqttCfg.retain ? 1 : 0;
   doc["apn"] = mqttCfg.apn;
@@ -1645,8 +1663,8 @@ static bool loadMqttCfg() {
   if (!doc["gsm_mqtt_pass"].isNull()) {
     mqttCfg.gsmMqttPass = String((const char*)(doc["gsm_mqtt_pass"] | ""));
   }
-  mqttCfg.clientId = String((const char*)(doc["client_id"] | "ESPRelay4"));
-  mqttCfg.base = normalizeBaseTopic(String((const char*)(doc["base"] | "esprelay4")));
+  mqttCfg.clientId = String((const char*)(doc["client_id"] | ""));
+  mqttCfg.base = normalizeBaseTopic(String((const char*)(doc["base"] | "espr4")));
   mqttCfg.discoveryPrefix = String((const char*)(doc["discovery_prefix"] | "homeassistant"));
   mqttCfg.retain = (doc["retain"] | 1) ? true : false;
   mqttCfg.apn = String((const char*)(doc["apn"] | GPRS_DEFAULT_APN));
@@ -1726,14 +1744,11 @@ static bool mqttHostLooksPrivateForGsm(const String& host) {
 }
 
 static String mqttBaseTopic() {
-  return normalizeBaseTopic(mqttCfg.base);
+  return normalizeBaseTopic(mqttCfg.base) + "/" + mqttDeviceId();
 }
 
 static String mqttNodeId() {
-  String id = mqttCfg.clientId;
-  id.trim();
-  if (id.length() == 0) id = "ESPRelay4";
-  return id;
+  return mqttDeviceId();
 }
 
 static String tempAddrToString(const DeviceAddress &a){
@@ -2290,6 +2305,19 @@ static bool mqttTryConnectTransport(const String& transport) {
     if (!mqttShouldTryEthernetNow()) return false;
   } else {
     if (!mqttTransportAllowsGsm()) return false;
+    if (!mqttHasDedicatedGsmBroker()) {
+      String hostNoGsmOverride = String(mqttHostForTransport("gsm"));
+      if (mqttHostLooksPrivateForGsm(hostNoGsmOverride)) {
+        static uint32_t lastPrivateHostWarnMs = 0;
+        const uint32_t nowWarn = millis();
+        if (nowWarn - lastPrivateHostWarnMs >= 30000) {
+          lastPrivateHostWarnMs = nowWarn;
+          Serial.printf("[MQTT][GSM] connect desactive: host '%s' prive sans gsm_mqtt_host public\n",
+                        hostNoGsmOverride.c_str());
+        }
+        return false;
+      }
+    }
     if (!gsmEnsureData()) {
       Serial.println("[MQTT][GSM] skip connect: 1NCE not ready");
       return false;
@@ -3026,6 +3054,7 @@ static void sendText(Client& c, const String& body, const char* ctype, int code=
 static void buildStateJson(String &out){
   static StaticJsonDocument<4096> doc;
   doc.clear();
+  doc["device_id"] = mqttDeviceId();
   JsonArray inA = doc["inputs"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
   JsonArray ovA = doc["override"].to<JsonArray>();
@@ -3129,6 +3158,7 @@ static void sendJsonState(Client& c){
 static void buildStateJsonBle(String &out){
   static StaticJsonDocument<1536> doc;
   doc.clear();
+  doc["device_id"] = mqttDeviceId();
   JsonArray inA = doc["inputs"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
   JsonArray ovA = doc["override"].to<JsonArray>();
@@ -3237,8 +3267,10 @@ static void sendJsonBackup(Client& c){
   mq["gsm_mqtt_port"] = mqttCfg.gsmMqttPort;
   mq["gsm_mqtt_user"] = mqttCfg.gsmMqttUser;
   mq["gsm_mqtt_pass"] = mqttCfg.gsmMqttPass;
-  mq["client_id"] = mqttCfg.clientId;
+  mq["client_id"] = mqttNodeId();
+  mq["device_id"] = mqttDeviceId();
   mq["base"] = mqttCfg.base;
+  mq["base_effective"] = mqttBaseTopic();
   mq["discovery_prefix"] = mqttCfg.discoveryPrefix;
   mq["retain"] = mqttCfg.retain ? 1 : 0;
   mq["apn"] = mqttCfg.apn;
@@ -3354,8 +3386,8 @@ static bool parseMqttFromJson(JsonObject o, MqttConfig &nextCfg, String &err) {
   nextCfg.gsmMqttPort = (uint16_t)gsmMqttPort;
   nextCfg.gsmMqttUser = String((const char*)(o["gsm_mqtt_user"] | ""));
   nextCfg.gsmMqttPass = String((const char*)(o["gsm_mqtt_pass"] | ""));
-  nextCfg.clientId = String((const char*)(o["client_id"] | "ESPRelay4"));
-  nextCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "esprelay4")));
+  nextCfg.clientId = String((const char*)(o["client_id"] | ""));
+  nextCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "espr4")));
   nextCfg.discoveryPrefix = String((const char*)(o["discovery_prefix"] | "homeassistant"));
   nextCfg.retain = (o["retain"] | 1) ? true : false;
   nextCfg.apn = String((const char*)(o["apn"] | GPRS_DEFAULT_APN));
@@ -4157,6 +4189,9 @@ void setup() {
 
   // MQTT
   loadMqttCfg();
+  Serial.printf("[MQTT] device_id=%s base_effective=%s\n",
+                mqttDeviceId().c_str(),
+                mqttBaseTopic().c_str());
   String mqttBootTransport = normalizeMqttTransport(mqttCfg.transport);
   Serial.printf("[MQTT] cfg enabled=%d transport=%s host=%s:%u gsm_host=%s:%u\n",
                 mqttCfg.enabled ? 1 : 0,
