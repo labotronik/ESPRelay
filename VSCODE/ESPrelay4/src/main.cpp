@@ -1743,6 +1743,37 @@ static String tempAddrToString(const DeviceAddress &a){
   return String(buf);
 }
 
+static bool isDs18Family(uint8_t family) {
+  return family == 0x28 || family == 0x10 || family == 0x22;
+}
+
+static uint8_t scanOneWireTempBus() {
+  uint8_t found = 0;
+  DeviceAddress addr = {0};
+  oneWire.reset_search();
+  while (oneWire.search(addr)) {
+    if (OneWire::crc8(addr, 7) != addr[7]) {
+      Serial.println("[TEMP] ignore sensor with bad CRC");
+      continue;
+    }
+    if (!isDs18Family(addr[0])) {
+      Serial.printf("[TEMP] ignore unsupported family 0x%02X\n", addr[0]);
+      continue;
+    }
+    if (found >= TEMP_MAX_SENSORS) {
+      Serial.printf("[TEMP] sensor limit reached (%u)\n", TEMP_MAX_SENSORS);
+      break;
+    }
+    memcpy(tempAddr[found], addr, sizeof(DeviceAddress));
+    tempC[found] = -127.0f;
+    lastTempPub[found] = -127.0f;
+    Serial.printf("[TEMP] sensor #%u addr=%s\n", found + 1, tempAddrToString(tempAddr[found]).c_str());
+    found++;
+  }
+  oneWire.reset_search();
+  return found;
+}
+
 static String ruleSummaryShort(int relayIndex){
   JsonArray rel = rulesDoc["relays"].as<JsonArray>();
   if(!rel || relayIndex < 0 || relayIndex >= (int)rel.size()) return "NONE";
@@ -4078,17 +4109,29 @@ void setup() {
   Wire.setTimeOut(20); // avoid long blocking I2C calls that can starve HTTP loop
 
   // 1-Wire temp sensors
+  pinMode(PIN_ONEWIRE, INPUT_PULLUP); // fallback pull-up (external 4.7k to 3V3 still recommended)
+  delay(5);
   tempSensors.begin();
   tempSensors.setWaitForConversion(false); // avoid blocking up to ~750ms per request
-  tempCount = tempSensors.getDeviceCount();
-  if(tempCount > TEMP_MAX_SENSORS) tempCount = TEMP_MAX_SENSORS;
-  for (uint8_t i = 0; i < tempCount; i++) {
-    if(tempSensors.getAddress(tempAddr[i], i)) {
-      tempC[i] = -127.0f;
-      lastTempPub[i] = -127.0f;
+  bool busPresent = oneWire.reset();
+  Serial.printf("[TEMP] bus reset on GPIO%d: %s\n", PIN_ONEWIRE, busPresent ? "PRESENT" : "NO DEVICE");
+  tempCount = scanOneWireTempBus();
+  if (tempCount == 0) {
+    uint8_t dallasCount = tempSensors.getDeviceCount();
+    if (dallasCount > TEMP_MAX_SENSORS) dallasCount = TEMP_MAX_SENSORS;
+    for (uint8_t i = 0; i < dallasCount; i++) {
+      if (tempSensors.getAddress(tempAddr[i], i)) {
+        tempC[i] = -127.0f;
+        lastTempPub[i] = -127.0f;
+        tempCount++;
+        Serial.printf("[TEMP] sensor #%u addr=%s (Dallas fallback)\n", tempCount, tempAddrToString(tempAddr[i]).c_str());
+      }
     }
   }
   Serial.printf("[TEMP] sensors=%u on GPIO%d\n", tempCount, PIN_ONEWIRE);
+  if (tempCount == 0) {
+    Serial.println("[TEMP] no DS18B20 detected (check DATA pin, GND, 3V3 and 4.7k pull-up)");
+  }
 
   // DHT22
   dht.begin();

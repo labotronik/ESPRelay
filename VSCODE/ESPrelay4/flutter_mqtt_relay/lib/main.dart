@@ -40,6 +40,7 @@ class RelayMqttSettings {
     required this.baseTopic,
     required this.clientId,
     required this.relayNames,
+    required this.inputNames,
   });
 
   String host;
@@ -49,6 +50,7 @@ class RelayMqttSettings {
   String baseTopic;
   String clientId;
   Map<int, String> relayNames;
+  Map<int, String> inputNames;
 
   static const _kHost = 'mqtt_host';
   static const _kPort = 'mqtt_port';
@@ -58,6 +60,7 @@ class RelayMqttSettings {
   static const _kClient = 'mqtt_client';
   static const _kClientAuto = 'mqtt_client_auto';
   static const _kRelayNamePrefix = 'relay_name_';
+  static const _kInputNamePrefix = 'input_name_';
   static const _legacyClientId = 'ESPRELAY_APP';
   static const int _relayCount = 4;
 
@@ -67,9 +70,22 @@ class RelayMqttSettings {
     };
   }
 
+  static Map<int, String> _defaultInputNames() {
+    return <int, String>{
+      for (int i = 1; i <= _relayCount; i++) i: 'E$i',
+    };
+  }
+
   static String _normalizeRelayName(String? name, int relayId) {
     final trimmed = (name ?? '').trim();
     if (trimmed.isEmpty) return 'R$relayId';
+    if (trimmed.length > 24) return trimmed.substring(0, 24);
+    return trimmed;
+  }
+
+  static String _normalizeInputName(String? name, int inputId) {
+    final trimmed = (name ?? '').trim();
+    if (trimmed.isEmpty) return 'E$inputId';
     if (trimmed.length > 24) return trimmed.substring(0, 24);
     return trimmed;
   }
@@ -83,6 +99,7 @@ class RelayMqttSettings {
       baseTopic: 'esprelay4',
       clientId: 'ESPRELAY_APP',
       relayNames: _defaultRelayNames(),
+      inputNames: _defaultInputNames(),
     );
   }
 
@@ -91,9 +108,12 @@ class RelayMqttSettings {
     final d = RelayMqttSettings.defaults();
     final autoClientId = await _resolveClientId(prefs);
     final loadedRelayNames = <int, String>{};
+    final loadedInputNames = <int, String>{};
     for (int i = 1; i <= _relayCount; i++) {
       loadedRelayNames[i] =
           _normalizeRelayName(prefs.getString('$_kRelayNamePrefix$i'), i);
+      loadedInputNames[i] =
+          _normalizeInputName(prefs.getString('$_kInputNamePrefix$i'), i);
     }
     return RelayMqttSettings(
       host: prefs.getString(_kHost) ?? d.host,
@@ -103,6 +123,7 @@ class RelayMqttSettings {
       baseTopic: prefs.getString(_kBase) ?? d.baseTopic,
       clientId: autoClientId,
       relayNames: loadedRelayNames,
+      inputNames: loadedInputNames,
     );
   }
 
@@ -206,6 +227,9 @@ class RelayMqttSettings {
       final normalized = _normalizeRelayName(relayNames[i], i);
       relayNames[i] = normalized;
       await prefs.setString('$_kRelayNamePrefix$i', normalized);
+      final normalizedInput = _normalizeInputName(inputNames[i], i);
+      inputNames[i] = normalizedInput;
+      await prefs.setString('$_kInputNamePrefix$i', normalizedInput);
     }
   }
 }
@@ -226,6 +250,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
 
   late final TabController _tabController;
   late final Map<int, TextEditingController> _relayNameCtrls;
+  late final Map<int, TextEditingController> _inputNameCtrls;
 
   RelayMqttSettings _settings = RelayMqttSettings.defaults();
   final _hostCtrl = TextEditingController();
@@ -270,6 +295,9 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     _relayNameCtrls = <int, TextEditingController>{
       for (int i = 1; i <= _maxIoIndex; i++) i: TextEditingController(),
     };
+    _inputNameCtrls = <int, TextEditingController>{
+      for (int i = 1; i <= _maxIoIndex; i++) i: TextEditingController(),
+    };
     _initSettings();
   }
 
@@ -288,6 +316,9 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     for (final ctrl in _relayNameCtrls.values) {
       ctrl.dispose();
     }
+    for (final ctrl in _inputNameCtrls.values) {
+      ctrl.dispose();
+    }
     super.dispose();
   }
 
@@ -303,6 +334,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       _clientCtrl.text = loaded.clientId;
       for (int i = 1; i <= _maxIoIndex; i++) {
         _relayNameCtrls[i]!.text = loaded.relayNames[i] ?? 'R$i';
+        _inputNameCtrls[i]!.text = loaded.inputNames[i] ?? 'E$i';
       }
     });
   }
@@ -311,11 +343,17 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     return _settings.relayNames[relayId] ?? 'R$relayId';
   }
 
+  String _inputLabel(int inputId) {
+    return _settings.inputNames[inputId] ?? 'E$inputId';
+  }
+
   Future<void> _saveRelaySetup() async {
     FocusScope.of(context).unfocus();
     for (int i = 1; i <= _maxIoIndex; i++) {
       final next = _relayNameCtrls[i]!.text.trim();
       _settings.relayNames[i] = next.isEmpty ? 'R$i' : next;
+      final nextInput = _inputNameCtrls[i]!.text.trim();
+      _settings.inputNames[i] = nextInput.isEmpty ? 'E$i' : nextInput;
     }
     await _settings.save();
     if (!mounted) return;
@@ -708,6 +746,24 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     }
   }
 
+  Future<void> _publishVinSet(int inputId, String action) async {
+    final client = _client;
+    if (client == null || !_connected) {
+      _showSnack('Not connected to MQTT.');
+      return;
+    }
+
+    final topic = '${_settings.baseTopic}/vin/$inputId/set';
+    final builder = MqttClientPayloadBuilder();
+    builder.addString(action);
+
+    final ok =
+        client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!) > 0;
+    if (!ok) {
+      _showSnack('Publish failed for Vinput $inputId.');
+    }
+  }
+
   void _showSnack(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -868,6 +924,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   Widget _inputRow(int inputId) {
     final inputOn = _inputStates[inputId] ?? false;
     final vinOn = _vinStates[inputId] ?? false;
+    final inputName = _inputLabel(inputId);
 
     final inputChip = inputOn
         ? _pill('ON',
@@ -897,16 +954,33 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: const Color(0xFFDADADA)),
       ),
-      child: Row(
+      child: Column(
         children: [
-          Text(
-            'E$inputId',
-            style: const TextStyle(fontWeight: FontWeight.w700),
+          Row(
+            children: [
+              Text(
+                inputName,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(width: 8),
+              inputChip,
+              const Spacer(),
+              vinChip,
+            ],
           ),
-          const SizedBox(width: 8),
-          inputChip,
-          const Spacer(),
-          vinChip,
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.tonal(
+                  onPressed: _connected
+                      ? () => _publishVinSet(inputId, vinOn ? 'OFF' : 'ON')
+                      : null,
+                  child: Text(vinOn ? 'Set VIN OFF' : 'Set VIN ON'),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -1080,6 +1154,8 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
           child: const Text(
             'Relay command topics:\n'
             '  <base>/relay/1/set payload ON|OFF|AUTO\n'
+            'Vinput command topics:\n'
+            '  <base>/vin/1/set payload ON|OFF|TOGGLE\n'
             'State topics:\n'
             '  <base>/relay/1/state\n'
             '  <base>/input/1/state\n'
@@ -1112,6 +1188,12 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
               const SizedBox(height: 10),
               for (int i = 1; i <= _maxIoIndex; i++)
                 _field('Relay $i label', _relayNameCtrls[i]!),
+              const SizedBox(height: 8),
+              const Text('Input names',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 10),
+              for (int i = 1; i <= _maxIoIndex; i++)
+                _field('Input $i label', _inputNameCtrls[i]!),
               FilledButton(
                 onPressed: _saveRelaySetup,
                 child: const Text('Save setup'),
