@@ -86,6 +86,9 @@
     .form-grid .muted{justify-self:start}
     .form-grid input,
     .form-grid select{width:100%;max-width:100%}
+    .ota-drop-zone{border:1px dashed var(--b);border-radius:12px;padding:10px;background:#fff}
+    .ota-drop-zone.drag-over{border-color:#0f5cc0;background:#eef5ff}
+    .ota-drop-hint{margin-top:6px}
     @media(max-width:520px){
       .form-grid{grid-template-columns:1fr}
       .form-grid .muted{justify-self:start}
@@ -104,10 +107,12 @@
       .tab{font-size:.85em}
     }
     body.dark .subcard{background:#1a1a1a;border-color:var(--b)}
+    body.dark .ota-drop-zone{background:#1a1a1a;border-color:var(--b)}
+    body.dark .ota-drop-zone.drag-over{background:#263247;border-color:#7ea6df}
   </style>
 </head>
 <body>
-  <h1 data-i18n="page.header">ESPRelay4 - Controller</h1>
+  <h1 data-i18n="page.header">ESPRelay4 - LBTK</h1>
   <div class="inline">
     <span id="net" class="pill">ETH: ?</span>
     <span id="fw" class="pill">FW: --</span>
@@ -350,13 +355,19 @@
       <h3 data-i18n="ota.title">OTA Update</h3>
       <div class="muted" data-i18n="ota.desc">Upload firmware.bin or littlefs.bin</div>
       <div class="sep"></div>
-      <div class="inline">
-        <input id="ota_fw" type="file" accept=".bin">
-        <button class="small" onclick="uploadOta('fw')" data-i18n="ota.upload_fw">Upload firmware</button>
+      <div id="ota_fw_zone" class="ota-drop-zone">
+        <div class="inline">
+          <input id="ota_fw" type="file" accept=".bin">
+          <button class="small" onclick="uploadOta('fw')" data-i18n="ota.upload_fw">Upload firmware</button>
+        </div>
+        <div class="muted ota-drop-hint" data-i18n="ota.drop_fw">Drag and drop firmware.bin here</div>
       </div>
-      <div class="inline" style="margin-top:8px;">
-        <input id="ota_fs" type="file" accept=".bin">
-        <button class="small" onclick="uploadOta('fs')" data-i18n="ota.upload_fs">Upload FS</button>
+      <div id="ota_fs_zone" class="ota-drop-zone" style="margin-top:8px;">
+        <div class="inline">
+          <input id="ota_fs" type="file" accept=".bin">
+          <button class="small" onclick="uploadOta('fs')" data-i18n="ota.upload_fs">Upload FS</button>
+        </div>
+        <div class="muted ota-drop-hint" data-i18n="ota.drop_fs">Drag and drop littlefs.bin here</div>
       </div>
       <div id="ota_progress_wrap" class="inline" style="margin-top:8px;gap:10px;align-items:center;display:none;">
         <progress id="ota_progress" value="0" max="100" style="width:220px;"></progress>
@@ -434,7 +445,7 @@ async function loadLang(l){
 }
 
 function applyI18n(){
-  document.title = t("page.title", "ESPRelay");
+  document.title = t("page.title", "ESPRelay - labotronik");
   document.querySelectorAll("[data-i18n]").forEach(el=>{
     const key = el.dataset.i18n;
     if(key) el.textContent = t(key, el.textContent);
@@ -1644,14 +1655,14 @@ async function saveMqtt(){
   }
 }
 
-async function uploadOta(kind){
+async function uploadOta(kind, droppedFile){
   if(!requireAuth()) return;
   const input = kind === "fw" ? $("ota_fw") : $("ota_fs");
-  if(!input || !input.files || !input.files[0]){
+  const file = droppedFile || (input && input.files && input.files[0]);
+  if(!file){
     toast(t("toast.ota_file_required","Select a file"), false);
     return;
   }
-  const file = input.files[0];
   const auth = authHeader();
   const statusEl = $("ota_status");
   const prog = $("ota_progress");
@@ -1663,24 +1674,31 @@ async function uploadOta(kind){
   if(statusEl) statusEl.textContent = t("ota.hashing","Calculating checksum…");
 
   let hashHex = "";
-  try{
-    const buf = await file.arrayBuffer();
-    const digest = await crypto.subtle.digest("SHA-256", buf);
-    const bytes = new Uint8Array(digest);
-    hashHex = Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join("");
-  }catch(e){
-    if(statusEl) statusEl.textContent = "";
-    if(wrap) wrap.style.display = "none";
-    toast(t("toast.ota_hash_fail","Checksum failed"), false);
-    return;
+  let hasChecksum = false;
+  if(window.crypto && window.crypto.subtle){
+    try{
+      const buf = await file.arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", buf);
+      const bytes = new Uint8Array(digest);
+      hashHex = Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join("");
+      hasChecksum = true;
+    }catch(e){
+      console.warn("SHA-256 unavailable, continue without checksum", e);
+    }
+  } else {
+    console.warn("crypto.subtle unavailable, continue without checksum");
   }
 
-  if(statusEl) statusEl.textContent = t("ota.uploading","Uploading…");
+  if(statusEl){
+    statusEl.textContent = hasChecksum
+      ? t("ota.uploading","Uploading…")
+      : t("ota.uploading_no_hash","Uploading (no checksum)…");
+  }
 
   const xhr = new XMLHttpRequest();
   xhr.open("POST", kind === "fw" ? "/api/ota" : "/api/otafs", true);
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
-  xhr.setRequestHeader("X-Checksum-Sha256", hashHex);
+  if(hasChecksum) xhr.setRequestHeader("X-Checksum-Sha256", hashHex);
   if(auth) xhr.setRequestHeader("Authorization", auth);
 
   xhr.upload.onprogress = (e)=>{
@@ -1703,6 +1721,68 @@ async function uploadOta(kind){
   };
 
   xhr.send(file);
+}
+
+function bindOtaDropZone(zoneId, kind){
+  const zone = $(zoneId);
+  const input = kind === "fw" ? $("ota_fw") : $("ota_fs");
+  if(!zone || !input) return;
+
+  let dragDepth = 0;
+  const prevent = (ev)=>{
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+  const setDrag = (on)=>zone.classList.toggle("drag-over", !!on);
+  zone.addEventListener("dragenter", (ev)=>{
+    prevent(ev);
+    dragDepth += 1;
+    setDrag(true);
+  });
+  zone.addEventListener("dragover", (ev)=>{
+    prevent(ev);
+    setDrag(true);
+  });
+  zone.addEventListener("dragleave", (ev)=>{
+    prevent(ev);
+    dragDepth = Math.max(0, dragDepth - 1);
+    if(dragDepth === 0) setDrag(false);
+  });
+  zone.addEventListener("dragend", (ev)=>{
+    prevent(ev);
+    dragDepth = 0;
+    setDrag(false);
+  });
+  zone.addEventListener("drop", async (ev)=>{
+    prevent(ev);
+    dragDepth = 0;
+    setDrag(false);
+    const files = ev.dataTransfer && ev.dataTransfer.files;
+    if(!files || !files.length){
+      toast(t("toast.ota_file_required","Select a file"), false);
+      return;
+    }
+    const file = files[0];
+    if(!/\.bin$/i.test(file.name || "")){
+      toast(t("toast.ota_bin_required","Please select a .bin file"), false);
+      return;
+    }
+    try{
+      if(typeof DataTransfer !== "undefined"){
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+      }
+    }catch(e){
+      console.warn("Unable to set file input from drop", e);
+    }
+    await uploadOta(kind, file);
+  });
+}
+
+function setupOtaDropZones(){
+  bindOtaDropZone("ota_fw_zone", "fw");
+  bindOtaDropZone("ota_fs_zone", "fs");
 }
 
 ["mqtt_enabled","mqtt_transport","mqtt_host","mqtt_port","mqtt_user","mqtt_pass","mqtt_client","mqtt_disc","mqtt_gsm_host","mqtt_gsm_port","mqtt_gsm_mqtt_user","mqtt_gsm_mqtt_pass","mqtt_apn","mqtt_gsm_user","mqtt_gsm_pass","mqtt_retain"]
@@ -1828,6 +1908,7 @@ setInterval(refreshState, 1500);
 setInterval(updateHeartbeatIndicator, 500);
 async function init(){
   await loadLang(lang);
+  setupOtaDropZones();
   applyTheme();
   if($("auth_user")) $("auth_user").value = "";
   if($("auth_pass")) $("auth_pass").value = "";

@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,6 +39,7 @@ class RelayMqttSettings {
     required this.username,
     required this.password,
     required this.baseTopic,
+    required this.cardId,
     required this.clientId,
     required this.relayNames,
     required this.inputNames,
@@ -48,6 +50,7 @@ class RelayMqttSettings {
   String username;
   String password;
   String baseTopic;
+  String cardId;
   String clientId;
   Map<int, String> relayNames;
   Map<int, String> inputNames;
@@ -57,6 +60,7 @@ class RelayMqttSettings {
   static const _kUser = 'mqtt_user';
   static const _kPass = 'mqtt_pass';
   static const _kBase = 'mqtt_base';
+  static const _kCardId = 'mqtt_card_id';
   static const _kClient = 'mqtt_client';
   static const _kClientAuto = 'mqtt_client_auto';
   static const _kRelayNamePrefix = 'relay_name_';
@@ -96,7 +100,8 @@ class RelayMqttSettings {
       port: 1883,
       username: '',
       password: '',
-      baseTopic: 'esprelay4',
+      baseTopic: 'espr4',
+      cardId: '',
       clientId: 'ESPRELAY_APP',
       relayNames: _defaultRelayNames(),
       inputNames: _defaultInputNames(),
@@ -120,11 +125,25 @@ class RelayMqttSettings {
       port: prefs.getInt(_kPort) ?? d.port,
       username: prefs.getString(_kUser) ?? d.username,
       password: prefs.getString(_kPass) ?? d.password,
-      baseTopic: prefs.getString(_kBase) ?? d.baseTopic,
+      baseTopic: _normalizeBaseTopic(prefs.getString(_kBase) ?? d.baseTopic),
+      cardId: _normalizeCardId(prefs.getString(_kCardId) ?? d.cardId),
       clientId: autoClientId,
       relayNames: loadedRelayNames,
       inputNames: loadedInputNames,
     );
+  }
+
+  static String _normalizeBaseTopic(String? base) {
+    return (base ?? '').trim().replaceAll(RegExp(r'^/+|/+$'), '');
+  }
+
+  static String _normalizeCardId(String? cardId) {
+    return (cardId ?? '')
+        .trim()
+        .replaceAll(':', '')
+        .replaceAll('-', '')
+        .replaceAll(RegExp(r'\s+'), '')
+        .toUpperCase();
   }
 
   static Future<String> _resolveClientId(SharedPreferences prefs) async {
@@ -221,7 +240,8 @@ class RelayMqttSettings {
     await prefs.setInt(_kPort, port);
     await prefs.setString(_kUser, username);
     await prefs.setString(_kPass, password);
-    await prefs.setString(_kBase, baseTopic.trim());
+    await prefs.setString(_kBase, _normalizeBaseTopic(baseTopic));
+    await prefs.setString(_kCardId, _normalizeCardId(cardId));
     await prefs.setString(_kClient, clientId.trim());
     for (int i = 1; i <= _relayCount; i++) {
       final normalized = _normalizeRelayName(relayNames[i], i);
@@ -258,6 +278,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   final _userCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
   final _baseCtrl = TextEditingController();
+  final _cardIdCtrl = TextEditingController();
   final _clientCtrl = TextEditingController();
 
   MqttServerClient? _client;
@@ -312,6 +333,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     _userCtrl.dispose();
     _passCtrl.dispose();
     _baseCtrl.dispose();
+    _cardIdCtrl.dispose();
     _clientCtrl.dispose();
     for (final ctrl in _relayNameCtrls.values) {
       ctrl.dispose();
@@ -331,6 +353,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       _userCtrl.text = loaded.username;
       _passCtrl.text = loaded.password;
       _baseCtrl.text = loaded.baseTopic;
+      _cardIdCtrl.text = loaded.cardId;
       _clientCtrl.text = loaded.clientId;
       for (int i = 1; i <= _maxIoIndex; i++) {
         _relayNameCtrls[i]!.text = loaded.relayNames[i] ?? 'R$i';
@@ -347,8 +370,73 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     return _settings.inputNames[inputId] ?? 'E$inputId';
   }
 
+  String _topicRootFromValues(String base, String cardId) {
+    final b = RelayMqttSettings._normalizeBaseTopic(base);
+    final id = RelayMqttSettings._normalizeCardId(cardId);
+    if (b.isEmpty || id.isEmpty) return '';
+    return '$b/$id';
+  }
+
+  String _topicRoot() {
+    return _topicRootFromValues(_settings.baseTopic, _settings.cardId);
+  }
+
+  bool _isValidCardId(String candidate) {
+    return RegExp(r'^[0-9A-F]{12}$').hasMatch(candidate);
+  }
+
+  String? _extractCardIdFromText(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return null;
+
+    final macWithSeparator =
+        RegExp(r'([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}').firstMatch(text);
+    if (macWithSeparator != null) {
+      final candidate = RelayMqttSettings._normalizeCardId(
+          macWithSeparator.group(0));
+      if (_isValidCardId(candidate)) return candidate;
+    }
+
+    final directHex = RegExp(r'[0-9A-Fa-f]{12}').firstMatch(text);
+    if (directHex != null) {
+      return directHex.group(0)!.toUpperCase();
+    }
+
+    final normalized = RelayMqttSettings._normalizeCardId(text);
+    if (_isValidCardId(normalized)) return normalized;
+    if (normalized.length > 12) {
+      final tail = normalized.substring(normalized.length - 12);
+      if (_isValidCardId(tail)) return tail;
+    }
+    return null;
+  }
+
+  Future<void> _scanCardIdQr() async {
+    FocusScope.of(context).unfocus();
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => const _CardIdQrScanPage(),
+      ),
+    );
+    if (!mounted || raw == null) return;
+
+    final cardId = _extractCardIdFromText(raw);
+    if (cardId == null) {
+      _showSnack('QR code does not contain a valid Card ID.');
+      return;
+    }
+    setState(() {
+      _cardIdCtrl.text = cardId;
+      _settings.cardId = cardId;
+    });
+    _showSnack('Card ID filled from QR.');
+  }
+
   Future<void> _saveRelaySetup() async {
     FocusScope.of(context).unfocus();
+    final normalizedCardId = RelayMqttSettings._normalizeCardId(_cardIdCtrl.text);
+    _settings.cardId = normalizedCardId;
+    _cardIdCtrl.text = normalizedCardId;
     for (int i = 1; i <= _maxIoIndex; i++) {
       final next = _relayNameCtrls[i]!.text.trim();
       _settings.relayNames[i] = next.isEmpty ? 'R$i' : next;
@@ -358,7 +446,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     await _settings.save();
     if (!mounted) return;
     setState(() {});
-    _showSnack('Relay names saved.');
+    _showSnack('Setup saved.');
   }
 
   Future<void> _connect() async {
@@ -370,12 +458,13 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       return;
     }
 
-    final normalizedBase =
-        _baseCtrl.text.trim().replaceAll(RegExp(r'^/+|/+$'), '');
+    final normalizedBase = RelayMqttSettings._normalizeBaseTopic(_baseCtrl.text);
+    final normalizedCardId = RelayMqttSettings._normalizeCardId(_cardIdCtrl.text);
     if (_hostCtrl.text.trim().isEmpty ||
         normalizedBase.isEmpty ||
+        normalizedCardId.isEmpty ||
         _clientCtrl.text.trim().isEmpty) {
-      _showSnack('Host, Base topic and Client ID are required.');
+      _showSnack('Host, Base topic, Card ID and Client ID are required.');
       return;
     }
 
@@ -392,7 +481,10 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       ..username = _userCtrl.text
       ..password = _passCtrl.text
       ..baseTopic = normalizedBase
+      ..cardId = normalizedCardId
       ..clientId = _clientCtrl.text.trim();
+    _baseCtrl.text = normalizedBase;
+    _cardIdCtrl.text = normalizedCardId;
 
     await _settings.save();
 
@@ -433,7 +525,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
         .withClientIdentifier(_settings.clientId)
         .startClean()
         .withWillQos(MqttQos.atMostOnce)
-        .withWillTopic('${_settings.baseTopic}/status')
+        .withWillTopic('${_topicRoot()}/status')
         .withWillMessage('offline');
     client.connectionMessage = connMessage;
 
@@ -475,7 +567,8 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   }
 
   void _subscribeBase(MqttServerClient client) {
-    final b = _settings.baseTopic;
+    final b = _topicRoot();
+    if (b.isEmpty) return;
     client.subscribe('$b/status', MqttQos.atLeastOnce);
     client.subscribe('$b/net/ip', MqttQos.atLeastOnce);
     client.subscribe('$b/gsm/iccid', MqttQos.atLeastOnce);
@@ -538,7 +631,9 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   }
 
   String? _extractAllowedSubTopic(String fullTopic) {
-    final prefix = '${_settings.baseTopic}/';
+    final root = _topicRoot();
+    if (root.isEmpty) return null;
+    final prefix = '$root/';
     if (!fullTopic.startsWith(prefix)) return null;
     final subTopic = fullTopic.substring(prefix.length);
     if (subTopic == 'status' ||
@@ -735,7 +830,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       return;
     }
 
-    final topic = '${_settings.baseTopic}/relay/$relayId/set';
+    final topic = '${_topicRoot()}/relay/$relayId/set';
     final builder = MqttClientPayloadBuilder();
     builder.addString(action);
 
@@ -753,7 +848,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
       return;
     }
 
-    final topic = '${_settings.baseTopic}/vin/$inputId/set';
+    final topic = '${_topicRoot()}/vin/$inputId/set';
     final builder = MqttClientPayloadBuilder();
     builder.addString(action);
 
@@ -1103,6 +1198,9 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
   }
 
   Widget _mqttTab() {
+    final previewRoot = _topicRootFromValues(_baseCtrl.text, _cardIdCtrl.text);
+    final topicRootPreview =
+        previewRoot.isEmpty ? '<base>/<card_id>' : previewRoot;
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -1126,6 +1224,9 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
               _field('Password', _passCtrl, obscure: true),
               _field('Base topic', _baseCtrl),
               _field('Client ID', _clientCtrl),
+              Text('Card ID is configured in Setup tab.',
+                  style: TextStyle(color: Colors.grey.shade700)),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   FilledButton(
@@ -1151,18 +1252,18 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
             border: Border.all(color: const Color(0xFFDADADA)),
           ),
           padding: const EdgeInsets.all(12),
-          child: const Text(
+          child: Text(
             'Relay command topics:\n'
-            '  <base>/relay/1/set payload ON|OFF|AUTO\n'
+            '  $topicRootPreview/relay/1/set payload ON|OFF|AUTO\n'
             'Vinput command topics:\n'
-            '  <base>/vin/1/set payload ON|OFF|TOGGLE\n'
+            '  $topicRootPreview/vin/1/set payload ON|OFF|TOGGLE\n'
             'State topics:\n'
-            '  <base>/relay/1/state\n'
-            '  <base>/input/1/state\n'
-            '  <base>/vin/1/state\n'
-            '  <base>/status\n'
-            '  <base>/net/ip',
-            style: TextStyle(fontFamily: 'monospace', fontSize: 12),
+            '  $topicRootPreview/relay/1/state\n'
+            '  $topicRootPreview/input/1/state\n'
+            '  $topicRootPreview/vin/1/state\n'
+            '  $topicRootPreview/status\n'
+            '  $topicRootPreview/net/ip',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
           ),
         ),
       ],
@@ -1183,6 +1284,19 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const Text('Target board',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 10),
+              _field('Card ID (MAC without :)', _cardIdCtrl),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: _scanCardIdQr,
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('Scan QR'),
+                ),
+              ),
+              const SizedBox(height: 8),
               const Text('Relay names',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
               const SizedBox(height: 10),
@@ -1227,6 +1341,69 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
           _inputsTab(),
           _mqttTab(),
           _setupTab(),
+        ],
+      ),
+    );
+  }
+}
+
+class _CardIdQrScanPage extends StatefulWidget {
+  const _CardIdQrScanPage();
+
+  @override
+  State<_CardIdQrScanPage> createState() => _CardIdQrScanPageState();
+}
+
+class _CardIdQrScanPageState extends State<_CardIdQrScanPage> {
+  final MobileScannerController _controller = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    facing: CameraFacing.back,
+    torchEnabled: false,
+  );
+  bool _hasResult = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_hasResult) return;
+    for (final barcode in capture.barcodes) {
+      final value = barcode.rawValue?.trim();
+      if (value == null || value.isEmpty) continue;
+      _hasResult = true;
+      Navigator.of(context).pop(value);
+      return;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Scan Card ID'),
+      ),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: _onDetect,
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              color: Colors.black.withValues(alpha: 0.45),
+              child: const Text(
+                'Center the QR code in front of the camera.',
+                style: TextStyle(color: Colors.white, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
         ],
       ),
     );

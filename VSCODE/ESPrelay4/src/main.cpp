@@ -54,7 +54,6 @@
 #endif
 #include <TinyGsmClient.h>
 
-// ===================== A ADAPTER A TON PCB =====================
 static const uint8_t PIN_LED = 40;
 static const uint8_t PIN_ONEWIRE = 1;  // DS18B20 (IO1)
 static const uint8_t PIN_DHT = 2;      // DHT22 (IO2)
@@ -2995,7 +2994,9 @@ static bool checkAuthHeader(const String& authHeader){
   if(authHeader.length() == 0) return false;
   String h = authHeader;
   h.trim();
-  if(!h.startsWith("Basic ")) return false;
+  String hl = h;
+  hl.toLowerCase();
+  if(!hl.startsWith("basic ")) return false;
   String b64 = h.substring(6);
   b64.trim();
   String decoded = base64Decode(b64);
@@ -3672,19 +3673,32 @@ static void handleHttpClient(Client& client, bool fromWifi=false){
   while(true){
     String h = readLine(client);
     if(h.length()==0) break;
-    if(h.startsWith("Content-Length:")){
-      contentLen = h.substring(15).toInt();
+    String hl = h;
+    hl.toLowerCase();
+    if(hl.startsWith("content-length:")){
+      int colon = h.indexOf(':');
+      if(colon >= 0) contentLen = h.substring(colon + 1).toInt();
     }
-    if(h.startsWith("Authorization:")){
-      authHeader = h.substring(14);
+    if(hl.startsWith("authorization:")){
+      int colon = h.indexOf(':');
+      if(colon >= 0) {
+        authHeader = h.substring(colon + 1);
+        authHeader.trim();
+      }
     }
-    if(h.startsWith("Content-Type:")){
-      contentType = h.substring(13);
-      contentType.trim();
+    if(hl.startsWith("content-type:")){
+      int colon = h.indexOf(':');
+      if(colon >= 0) {
+        contentType = h.substring(colon + 1);
+        contentType.trim();
+      }
     }
-    if(h.startsWith("X-Checksum-Sha256:")){
-      checksumSha256 = h.substring(18);
-      checksumSha256.trim();
+    if(hl.startsWith("x-checksum-sha256:")){
+      int colon = h.indexOf(':');
+      if(colon >= 0) {
+        checksumSha256 = h.substring(colon + 1);
+        checksumSha256.trim();
+      }
     }
   }
 
