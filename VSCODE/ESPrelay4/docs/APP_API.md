@@ -49,7 +49,7 @@ L’UI propose une vue par module, mais les règles utilisent l’index global.
 Structure (résumé) :
 ```json
 {
-  "version": 2,
+  "version": 3,
   "relays": [
     {
       "expr": { "op": "FOLLOW", "in": 1 },
@@ -59,6 +59,10 @@ Structure (résumé) :
       "pulseMs": 200
     }
   ],
+  "virtual_inputs": [
+    { "type": "switch", "pulse_ms": 250 },
+    { "type": "momentary", "pulse_ms": 250 }
+  ],
   "shutters": []
 }
 ```
@@ -67,6 +71,11 @@ Structure (résumé) :
 - `AND`, `OR`, `XOR` : logique multi‑entrées
 - `TOGGLE_RISE` : bascule sur front montant
 - `PULSE_RISE` : pulse sur front montant
+
+### Entrées virtuelles (`virtual_inputs[]`)
+- `type: "switch"` : état MQTT maintenu, découvert comme interrupteur Home Assistant.
+- `type: "momentary"` : impulsion automatique de `pulse_ms`, découverte comme bouton Home Assistant.
+- Valeur par défaut : `switch`, impulsion de 250 ms.
 
 ### Volets (shutters[])
 Jusqu’à 2 volets :
@@ -98,6 +107,8 @@ Servir la page Web depuis LittleFS.
 ```json
 {
   "inputs": [0,1,...],
+  "virtual_inputs": [0,1,...],
+  "virtual_input_types": ["switch","momentary",...],
   "relays": [0,1,...],
   "override": [-1,0,1,...],
   "reserved": [0,1,...],
@@ -121,11 +132,12 @@ Servir la page Web depuis LittleFS.
 ```
 
 ### GET /api/rules
-Retourne le JSON complet des règles (relays + shutters).
+Retourne le JSON complet des règles (`relays`, `virtual_inputs` et `shutters`).
 
 ### PUT /api/rules
 Remplace toutes les règles.
 - Validation taille `relays` = `total_relays`.
+- Normalisation de `virtual_inputs` à `total_inputs` entrées.
 - Validation volets + conflits de relais.
 
 ### POST /api/override
@@ -190,9 +202,22 @@ Retourne un backup complet :
 ### PUT /api/backup
 Applique et redémarre la carte.
 
+### POST /api/restart
+Redémarre la carte sans modifier la configuration. Authentification requise.
+
 ---
 
 ## MQTT (Home Assistant)
+
+Les topics de **commande** (`/relay/<n>/set`, `/relay/<n>/auto`, `/vin/<n>/set`,
+`/shutter/<n>/set`, `/wifi/ap/set`, `/ble/set`) doivent être publiés avec
+`retain: false`. Un ancien `ON` ou `TOGGLE` conservé par le broker serait sinon
+rejoué lors de chaque reconnexion et pourrait forcer un relais après redémarrage.
+La carte efface les commandes conservées avant de s'abonner à chaque connexion.
+Une publication vide utilisée pour cet effacement est ignorée par le firmware.
+L'option MQTT `retain` de la carte concerne les publications d'état, qui peuvent
+rester conservées. Les commandes envoyées pendant que la carte est hors ligne
+ne sont pas destinées à être exécutées au prochain démarrage.
 ### Disponibilité
 `<base>/status` = `online|offline`
 
@@ -202,6 +227,12 @@ Applique et redémarre la carte.
 
 ### Entrées
 - `base/input/<n>/state`
+
+### Entrées virtuelles
+- Commande : `base/vin/<n>/set`
+- État interne : `base/vin/<n>/state`
+- Type `switch` : payloads `ON`, `OFF` ou `TOGGLE`.
+- Type `momentary` : payload `PRESS` (les payloads `ON` et `TOGGLE` sont aussi acceptés) ; retour automatique à `OFF` après `pulse_ms`.
 
 ### Volets
 2 covers :
@@ -222,7 +253,7 @@ DHT22 :
 ## UI Web
 Onglets :
 - Dashboard : état entrées/relais/volets + capteurs si détectés
-- Programmation : règles + volets 1/2
+- Programmation : type des entrées virtuelles + règles + volets 1/2
 - JSON : vue JSON complet
 - Réseau : IP + MQTT
 - Backup : export / import

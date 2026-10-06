@@ -1,0 +1,5 @@
+[env:esp32s3_custom_n4_ethernet]
+; Adresse IP ou nom DNS de la carte (port HTTP optionnel, ex. 192.168.1.50:80).
+upload_port = 192.168.1.50
+custom_ota_user = admin
+custom_ota_password = votre_mot_de_passe

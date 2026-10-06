@@ -345,6 +345,11 @@ uint32_t inputChangeMs[MAX_INPUTS] = {0};
 static const uint32_t INPUT_DEBOUNCE_MS = 20;
 bool virtualInputs[MAX_INPUTS] = {0};
 bool lastVirtualPub[MAX_INPUTS] = {0};
+enum VirtualInputType : uint8_t { VIN_SWITCH=0, VIN_MOMENTARY=1 };
+static const uint32_t VINPUT_DEFAULT_PULSE_MS = 250;
+VirtualInputType virtualInputTypes[MAX_INPUTS] = {VIN_SWITCH};
+uint32_t virtualInputPulseMs[MAX_INPUTS] = {0};
+uint32_t virtualInputPulseUntilMs[MAX_INPUTS] = {0};
 bool combinedInputs[MAX_INPUTS] = {0};
 bool prevCombinedInputs[MAX_INPUTS] = {0};
 
@@ -1012,12 +1017,99 @@ static void addDefaultRelay(JsonArray rel, int i){
 
 static void setDefaultRules() {
   rulesDoc.clear();
-  rulesDoc["version"] = 2;
+  rulesDoc["version"] = 3;
 
   JsonArray rel = rulesDoc["relays"].to<JsonArray>();
   for(int i=0;i<totalRelays;i++) addDefaultRelay(rel, i);
 
+  JsonArray vin = rulesDoc["virtual_inputs"].to<JsonArray>();
+  for(int i=0;i<totalInputs;i++){
+    JsonObject cfg = vin.add<JsonObject>();
+    cfg["type"] = "switch";
+    cfg["pulse_ms"] = VINPUT_DEFAULT_PULSE_MS;
+  }
+
   rulesDoc["shutters"].to<JsonArray>(); // vide par défaut
+}
+
+static bool normalizeVirtualInputsConfig(JsonDocument &doc, String &errMsg) {
+  uint8_t types[MAX_INPUTS] = {0};
+  uint32_t pulseMs[MAX_INPUTS] = {0};
+  for(int i=0;i<totalInputs;i++) pulseMs[i] = VINPUT_DEFAULT_PULSE_MS;
+
+  if(!doc["virtual_inputs"].isNull()){
+    if(!doc["virtual_inputs"].is<JsonArray>()){
+      errMsg = "virtual_inputs must be array";
+      return false;
+    }
+    JsonArray src = doc["virtual_inputs"].as<JsonArray>();
+    if(src.size() > totalInputs){
+      errMsg = String("virtual_inputs max size ") + String(totalInputs);
+      return false;
+    }
+    for(size_t i=0;i<src.size();i++){
+      if(!src[i].is<JsonObject>()){
+        errMsg = "virtual_inputs entries must be objects";
+        return false;
+      }
+      JsonObject cfg = src[i].as<JsonObject>();
+      String type = String((const char*)(cfg["type"] | "switch"));
+      type.toLowerCase();
+      if(type == "switch") types[i] = VIN_SWITCH;
+      else if(type == "momentary") types[i] = VIN_MOMENTARY;
+      else {
+        errMsg = "virtual input type must be switch|momentary";
+        return false;
+      }
+      int pulse = cfg["pulse_ms"] | (int)VINPUT_DEFAULT_PULSE_MS;
+      if(pulse < 10 || pulse > 60000){
+        errMsg = "virtual input pulse_ms must be 10..60000";
+        return false;
+      }
+      pulseMs[i] = (uint32_t)pulse;
+    }
+  }
+
+  doc.remove("virtual_inputs");
+  JsonArray dst = doc["virtual_inputs"].to<JsonArray>();
+  for(int i=0;i<totalInputs;i++){
+    JsonObject cfg = dst.add<JsonObject>();
+    cfg["type"] = (types[i] == VIN_MOMENTARY) ? "momentary" : "switch";
+    cfg["pulse_ms"] = pulseMs[i];
+  }
+  return true;
+}
+
+static void applyVirtualInputsConfig() {
+  JsonArray cfgs = rulesDoc["virtual_inputs"].as<JsonArray>();
+  for(int i=0;i<MAX_INPUTS;i++){
+    VirtualInputType type = VIN_SWITCH;
+    uint32_t pulseMs = VINPUT_DEFAULT_PULSE_MS;
+    if(i < totalInputs && i < (int)cfgs.size()){
+      JsonObject cfg = cfgs[i].as<JsonObject>();
+      String typeText = String((const char*)(cfg["type"] | "switch"));
+      typeText.toLowerCase();
+      if(typeText == "momentary") type = VIN_MOMENTARY;
+      pulseMs = (uint32_t)(cfg["pulse_ms"] | (int)VINPUT_DEFAULT_PULSE_MS);
+    }
+    if(virtualInputTypes[i] != type) virtualInputs[i] = false;
+    virtualInputTypes[i] = type;
+    virtualInputPulseMs[i] = pulseMs;
+    virtualInputPulseUntilMs[i] = 0;
+    if(type == VIN_MOMENTARY) virtualInputs[i] = false;
+  }
+}
+
+static void virtualInputTick() {
+  const uint32_t now = millis();
+  for(int i=0;i<totalInputs;i++){
+    if(virtualInputTypes[i] != VIN_MOMENTARY) continue;
+    if(virtualInputPulseUntilMs[i] != 0 &&
+       (int32_t)(now - virtualInputPulseUntilMs[i]) >= 0){
+      virtualInputPulseUntilMs[i] = 0;
+      virtualInputs[i] = false;
+    }
+  }
 }
 
 static bool saveRulesToFS(const JsonDocument& doc) {
@@ -1048,7 +1140,7 @@ static bool loadRulesFromFS() {
   if(!rulesDoc["relays"].is<JsonArray>() || rulesDoc["relays"].as<JsonArray>().size() != totalRelays){
     Serial.println("[RULES] relays[] size mismatch -> normalize");
     JsonDocument newDoc;
-    newDoc["version"] = rulesDoc["version"] | 2;
+    newDoc["version"] = rulesDoc["version"] | 3;
 
     JsonArray newRel = newDoc["relays"].to<JsonArray>();
     for(int i=0;i<totalRelays;i++) addDefaultRelay(newRel, i);
@@ -1064,8 +1156,19 @@ static bool loadRulesFromFS() {
       for(JsonVariant v : rulesDoc["shutters"].as<JsonArray>()) shNew.add(v);
     }
 
+    if(rulesDoc["virtual_inputs"].is<JsonArray>()){
+      newDoc["virtual_inputs"].set(rulesDoc["virtual_inputs"]);
+    }
+
     rulesDoc.clear();
     rulesDoc.set(newDoc);
+    String vinErr;
+    if(!normalizeVirtualInputsConfig(rulesDoc, vinErr)){
+      Serial.printf("[RULES] invalid virtual_inputs after resize: %s -> defaults\n", vinErr.c_str());
+      rulesDoc.remove("virtual_inputs");
+      normalizeVirtualInputsConfig(rulesDoc, vinErr);
+    }
+    rulesDoc["version"] = 3;
     saveRulesToFS(rulesDoc);
     return true;
   }
@@ -1073,7 +1176,18 @@ static bool loadRulesFromFS() {
     rulesDoc.remove("shutters");
     rulesDoc["shutters"].to<JsonArray>();
   }
-  if(!rulesDoc["version"].is<int>()) rulesDoc["version"] = 2;
+  String rulesBeforeMigration;
+  serializeJson(rulesDoc, rulesBeforeMigration);
+  String vinErr;
+  if(!normalizeVirtualInputsConfig(rulesDoc, vinErr)){
+    Serial.printf("[RULES] invalid virtual_inputs: %s -> defaults\n", vinErr.c_str());
+    rulesDoc.remove("virtual_inputs");
+    normalizeVirtualInputsConfig(rulesDoc, vinErr);
+  }
+  rulesDoc["version"] = 3;
+  String rulesAfterMigration;
+  serializeJson(rulesDoc, rulesAfterMigration);
+  if(rulesBeforeMigration != rulesAfterMigration) saveRulesToFS(rulesDoc);
 
   Serial.println("[RULES] loaded /rules.json");
   return true;
@@ -1848,6 +1962,7 @@ static void mqttPublishDiscovery(const String& transport) {
     doc["uniq_id"] = uid;
     doc["stat_t"] = base + "/relay/" + String(i+1) + "/state";
     doc["cmd_t"] = base + "/relay/" + String(i+1) + "/set";
+    doc["retain"] = false;
     doc["pl_on"] = "ON";
     doc["pl_off"] = "OFF";
     doc["avty_t"] = avail;
@@ -1867,6 +1982,7 @@ static void mqttPublishDiscovery(const String& transport) {
     doc["name"] = "Relay " + String(i+1) + " AUTO";
     doc["uniq_id"] = uid + "_auto";
     doc["cmd_t"] = base + "/relay/" + String(i+1) + "/auto";
+    doc["retain"] = false;
     doc["pl_press"] = "AUTO";
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
@@ -1980,16 +2096,21 @@ static void mqttPublishDiscovery(const String& transport) {
     mqttPublishToTransport(transport, topic, out, true);
   }
 
-  // Virtual inputs (MQTT-driven) as switches
+  // Virtual inputs: persistent switches or momentary push buttons.
   for (int i = 0; i < totalInputs; i++) {
     doc.clear();
     String uid = id + "_vin_" + String(i+1);
     doc["name"] = "VInput " + String(i+1);
     doc["uniq_id"] = uid;
-    doc["stat_t"] = base + "/vin/" + String(i+1) + "/state";
     doc["cmd_t"] = base + "/vin/" + String(i+1) + "/set";
-    doc["pl_on"] = "ON";
-    doc["pl_off"] = "OFF";
+    doc["retain"] = false;
+    if (virtualInputTypes[i] == VIN_MOMENTARY) {
+      doc["payload_press"] = "PRESS";
+    } else {
+      doc["stat_t"] = base + "/vin/" + String(i+1) + "/state";
+      doc["pl_on"] = "ON";
+      doc["pl_off"] = "OFF";
+    }
     doc["avty_t"] = avail;
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
@@ -1998,9 +2119,16 @@ static void mqttPublishDiscovery(const String& transport) {
     dev["name"] = node;
     dev["mdl"] = "ESPRelay4";
     dev["mf"] = "ESPRelay4";
-    String topic = mqttCfg.discoveryPrefix + "/switch/" + uid + "/config";
+    const bool momentary = (virtualInputTypes[i] == VIN_MOMENTARY);
+    String oldTopic = mqttCfg.discoveryPrefix + (momentary ? "/switch/" : "/button/") + uid + "/config";
+    String topic = mqttCfg.discoveryPrefix + (momentary ? "/button/" : "/switch/") + uid + "/config";
+    // Remove the retained discovery message for the previous entity type.
+    mqttPublishToTransport(transport, oldTopic, "", true);
     String out; serializeJson(doc, out);
     mqttPublishToTransport(transport, topic, out, true);
+    mqttPublishToTransport(transport, base + "/vin/" + String(i+1) + "/state",
+                           virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
+    lastVirtualPub[i] = virtualInputs[i];
   }
 
   for (int s = 0; s < shuttersLimit(); s++) {
@@ -2010,6 +2138,7 @@ static void mqttPublishDiscovery(const String& transport) {
     doc["name"] = shCfg[s].name;
     doc["uniq_id"] = uid;
     doc["cmd_t"] = base + "/shutter/" + String(s+1) + "/set";
+    doc["retain"] = false;
     doc["stat_t"] = base + "/shutter/" + String(s+1) + "/state";
     doc["pl_open"] = "OPEN";
     doc["pl_close"] = "CLOSE";
@@ -2163,6 +2292,8 @@ static void mqttPublishStateSnapshot(const String& transport, bool controlOnly) 
 }
 
 static void mqttHandleMessage(const char* source, char* topic, byte* payload, unsigned int length) {
+  // Empty retained publications delete old commands; they are not actions.
+  if (length == 0) return;
   String t = String(topic);
   String p;
   bool fastCommand = false;
@@ -2197,9 +2328,21 @@ static void mqttHandleMessage(const char* source, char* topic, byte* payload, un
     int idx = t.substring((base + "/vin/").length()).toInt();
     if (idx >= 1 && idx <= totalInputs) {
       int i = idx - 1;
-      if (p == "ON") { virtualInputs[i] = true; fastCommand = true; }
-      else if (p == "OFF") { virtualInputs[i] = false; fastCommand = true; }
-      else if (p == "TOGGLE") { virtualInputs[i] = !virtualInputs[i]; fastCommand = true; }
+      if (virtualInputTypes[i] == VIN_MOMENTARY) {
+        if (p == "PRESS" || p == "ON" || p == "TOGGLE") {
+          virtualInputs[i] = true;
+          virtualInputPulseUntilMs[i] = millis() + virtualInputPulseMs[i];
+          fastCommand = true;
+        } else if (p == "OFF") {
+          virtualInputs[i] = false;
+          virtualInputPulseUntilMs[i] = 0;
+          fastCommand = true;
+        }
+      } else {
+        if (p == "ON") { virtualInputs[i] = true; fastCommand = true; }
+        else if (p == "OFF") { virtualInputs[i] = false; fastCommand = true; }
+        else if (p == "TOGGLE") { virtualInputs[i] = !virtualInputs[i]; fastCommand = true; }
+      }
     }
   }
   else if (t.startsWith(base + "/relay/") && t.endsWith("/set")) {
@@ -2247,6 +2390,25 @@ static void mqttSetup() {
   mqttClientGsm.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
   mqttClientEth.setCallback(mqttCallbackEth);
   mqttClientGsm.setCallback(mqttCallbackGsm);
+}
+
+static bool mqttClearRetainedCommands(PubSubClient &client) {
+  String base = mqttBaseTopic();
+  // The connection uses a clean session. Clear stale actions BEFORE SUBSCRIBE
+  // so the broker cannot replay an old ON/OFF/TOGGLE/PRESS after reboot.
+  for (int i = 1; i <= totalRelays; i++) {
+    if (!client.publish((base + "/relay/" + String(i) + "/set").c_str(), "", true)) return false;
+    if (!client.publish((base + "/relay/" + String(i) + "/auto").c_str(), "", true)) return false;
+  }
+  for (int i = 1; i <= totalInputs; i++) {
+    if (!client.publish((base + "/vin/" + String(i) + "/set").c_str(), "", true)) return false;
+  }
+  for (int s = 1; s <= shuttersLimit(); s++) {
+    if (!client.publish((base + "/shutter/" + String(s) + "/set").c_str(), "", true)) return false;
+  }
+  if (!client.publish((base + "/wifi/ap/set").c_str(), "", true)) return false;
+  if (!client.publish((base + "/ble/set").c_str(), "", true)) return false;
+  return true;
 }
 
 static void mqttSubscribeTopics(PubSubClient &client) {
@@ -2358,6 +2520,12 @@ static bool mqttTryConnectTransport(const String& transport) {
       mqttLastEthFailRc = 0;
       mqttEthAuthBlocked = false;
     }
+    if (!mqttClearRetainedCommands(*client)) {
+      Serial.println("[MQTT] retained command cleanup failed -> disconnect before subscribing");
+      client->disconnect();
+      return false;
+    }
+    Serial.println("[MQTT] retained commands cleared before subscribing");
     mqttSubscribeTopics(*client);
     if (mqttLowDataTransport(transport)) {
       Serial.println("[MQTT][GSM] low-data mode: publish control state only");
@@ -3057,6 +3225,8 @@ static void buildStateJson(String &out){
   doc.clear();
   doc["device_id"] = mqttDeviceId();
   JsonArray inA = doc["inputs"].to<JsonArray>();
+  JsonArray vinA = doc["virtual_inputs"].to<JsonArray>();
+  JsonArray vinTypeA = doc["virtual_input_types"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
   JsonArray ovA = doc["override"].to<JsonArray>();
   JsonArray rsA = doc["reserved"].to<JsonArray>();
@@ -3065,6 +3235,8 @@ static void buildStateJson(String &out){
 
   for(int i=0;i<totalInputs;i++){
     inA.add(inputs[i] ? 1 : 0);
+    vinA.add(virtualInputs[i] ? 1 : 0);
+    vinTypeA.add(virtualInputTypes[i] == VIN_MOMENTARY ? "momentary" : "switch");
   }
   for(int i=0;i<totalRelays;i++){
     reA.add(relays[i] ? 1 : 0);
@@ -3249,6 +3421,14 @@ static void sendJsonBackup(Client& c){
   static JsonDocument doc;
   doc.clear();
   doc["rules"] = rulesDoc;
+
+  // Include auxiliary settings so filesystem OTA can preserve them too.
+  JsonObject wifi = doc["wifi"].to<JsonObject>();
+  wifi["enabled"] = wifiCfg.enabled ? 1 : 0;
+  wifi["ssid"] = wifiCfg.ssid;
+  wifi["pass"] = wifiCfg.pass;
+  JsonObject ble = doc["ble"].to<JsonObject>();
+  ble["enabled"] = bleEnabled ? 1 : 0;
 
   JsonObject net = doc["net"].to<JsonObject>();
   net["mode"] = netCfg.dhcp ? "dhcp" : "static";
@@ -3601,7 +3781,10 @@ static bool validateAndApplyRulesDoc(JsonDocument &candidate, String &errMsg) {
   if(candidate["shutters"].isNull()){
     candidate["shutters"].to<JsonArray>();
   }
-  if(candidate["version"].isNull()) candidate["version"] = 2;
+  if(!normalizeVirtualInputsConfig(candidate, errMsg)){
+    return false;
+  }
+  candidate["version"] = 3;
 
   // parse shutter + validate
   String shErr;
@@ -3653,7 +3836,9 @@ static void rebuildRuntimeFromRules() {
     for(int s=0; s<shuttersLimit(); s++) shCfg[s].enabled = false;
     applyReservationsFromConfig();
   }
+  applyVirtualInputsConfig();
   mqttAnnouncedEth = false;
+  mqttAnnouncedGsm = false;
 }
 
 // ===============================================================
@@ -3858,6 +4043,13 @@ static void handleHttpClient(Client& client, bool fromWifi=false){
         sendText(client, String("{\"ok\":true,\"applied\":true}"), "application/json");
       }
     }
+  }
+  else if(method=="POST" && path=="/api/restart"){
+    if(!authed){ sendAuthRequired(client); return; }
+    sendText(client, String("{\"ok\":true,\"reboot\":true}"), "application/json");
+    delay(300);
+    ESP.restart();
+    return;
   }
   else if(method=="POST" && path=="/api/ota"){
     if(!authed){ sendAuthRequired(client); return; }
@@ -4234,29 +4426,19 @@ void loop() {
   // Serve HTTP first to keep UI/API responsive even if other tasks slow down.
   handleHttp();
 
-  // Process MQTT early so incoming commands are applied in the same loop cycle.
-  mqttLoop();
-  if (mqttFastCommandPending) {
-    // Fast path: apply command immediately, then continue normal cycle.
-    shutterTick();
-    evalSimpleRules();
-    buildFinalRelays();
-    pcaApplyRelays();
-    mqttFastCommandPending = false;
-  }
-
-  // read inputs early to update module status before serving HTTP
+  // Expire previous virtual pulses BEFORE receiving new MQTT commands, so a
+  // newly received short pulse is always evaluated at least once.
   pcaReadInputs();
   debounceInputs();
+  virtualInputTick();
+
+  // Process MQTT before combining inputs and evaluate each edge only once.
+  mqttLoop();
 
   // combine physical + virtual inputs for rules/edges
   for(int i=0;i<totalInputs;i++){
     combinedInputs[i] = inputs[i] || virtualInputs[i];
   }
-
-  updateWifiState();
-  heartbeatTick();
-  bleTick();
 
   // tick shutter BEFORE computing simple rules, so it can use prevInputs if needed
   shutterTick();
@@ -4270,6 +4452,17 @@ void loop() {
 
   // apply outputs
   pcaApplyRelays();
+  mqttFastCommandPending = false;
+
+  // Consume edges before any slower background tasks.
+  for(int k=0;k<totalInputs;k++){
+    prevInputs[k] = inputs[k];
+    prevCombinedInputs[k] = combinedInputs[k];
+  }
+
+  updateWifiState();
+  heartbeatTick();
+  bleTick();
 
   // Temperature polling
   if(millis() - lastTempReadMs > 5000){
@@ -4305,12 +4498,6 @@ void loop() {
         }
       }
     }
-  }
-
-  // update prev inputs for edge-based rules/toggle/pulse
-  for(int k=0;k<totalInputs;k++){
-    prevInputs[k] = inputs[k];
-    prevCombinedInputs[k] = combinedInputs[k];
   }
 
   // 1Hz log

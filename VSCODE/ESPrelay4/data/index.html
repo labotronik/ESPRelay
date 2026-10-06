@@ -187,8 +187,9 @@
     </div>
 
     <div class="card" style="margin-bottom:12px">
-      <h3 data-i18n="programming.simple_rules_title">Simple rules (R1..R4)</h3>
-      <div class="muted" data-i18n="programming.simple_rules_desc">FOLLOW / AND / OR / XOR / TOGGLE_RISE / PULSE_RISE + invert + delays.</div>
+      <h3 data-i18n="vinput.title">Virtual inputs</h3>
+      <div class="muted" data-i18n="vinput.desc">MQTT virtual inputs let Home Assistant simulate the board's physical inputs and trigger the same relay rules without pressing a wired button. Each VInput activates its corresponding input (VInput 1 → Input 1, etc.). Choose a persistent switch or a momentary push button.</div>
+      <div id="virtualInputsGrid" class="grid4" style="margin-top:10px"></div>
     </div>
 
     <div id="rulesGrid" class="grid4"></div>
@@ -216,6 +217,16 @@
       <div class="inline" style="margin-top:8px;">
         <button class="primary" id="auth_save_btn" onclick="saveAuth()" data-i18n="setup.save">Save</button>
         <span class="muted" id="auth_hint"></span>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:640px;margin-top:12px;">
+      <h3 data-i18n="restart.title">Restart device</h3>
+      <div class="muted" data-i18n="restart.desc">Restart the controller without changing its configuration.</div>
+      <div class="sep"></div>
+      <div class="inline">
+        <button class="primary" id="restart_btn" onclick="restartDevice()" data-i18n="restart.button">Restart</button>
+        <span class="muted" id="restart_hint"></span>
       </div>
     </div>
 
@@ -577,6 +588,24 @@ window.saveAuth = async ()=>{
   }
 };
 
+window.restartDevice = async ()=>{
+  if(!requireAuth()) return;
+  if(!window.confirm(t("restart.confirm","Restart the device now?"))) return;
+  const btn = $("restart_btn");
+  if(btn) btn.disabled = true;
+  setActionHint("restart_hint", t("restart.requesting","Restart request…"), "muted");
+  try{
+    await postRestart();
+    setActionHint("restart_hint", t("restart.in_progress","Restarting…"), "ok");
+    toast(t("restart.in_progress","Restarting…"));
+    window.setTimeout(()=>window.location.reload(), 6000);
+  }catch(e){
+    setActionHint("restart_hint", e.message || t("restart.failed","Restart failed"), "err", 8000);
+    toast(e.message || t("restart.failed","Restart failed"), false);
+    if(btn) btn.disabled = false;
+  }
+};
+
 function getModes(){
   return [
     {id:"NONE", label:t("mode.none","NONE (no rule)")},
@@ -707,6 +736,7 @@ const putMqtt = (body)=>apiJson("/api/mqtt",{method:"PUT",timeoutMs:10000,retrie
 const getBackup = ()=>apiJson("/api/backup");
 const putBackup = (body)=>apiJson("/api/backup",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 const putAuth = (body)=>apiJson("/api/auth",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const postRestart = ()=>apiJson("/api/restart",{method:"POST",timeoutMs:5000,retries:0});
 
 // -------- data model --------
 let rules = null;
@@ -760,9 +790,12 @@ function defaultRules(){
   const rCount = totalRelays || 4;
   const iCount = totalInputs || 4;
   return {
-    version: 2,
+    version: 3,
     relays: Array.from({length:rCount}).map((_,i)=>(
       { expr:{op:"NONE"}, invert:false, onDelay:0, offDelay:0, pulseMs:200 }
+    )),
+    virtual_inputs: Array.from({length:iCount}).map(()=>(
+      {type:"switch", pulse_ms:250}
     )),
     shutters: []
   };
@@ -770,15 +803,59 @@ function defaultRules(){
 
 function ensureRulesBase(r){
   if(!r || typeof r!=="object") r = defaultRules();
-  if(!r.version) r.version = 2;
+  r.version = 3;
   if(!Array.isArray(r.relays)) r.relays = defaultRules().relays;
   if(r.relays.length !== (totalRelays || r.relays.length)){
     const d = defaultRules();
     r.relays = d.relays;
   }
   if(!Array.isArray(r.shutters)) r.shutters = [];
+  if(!Array.isArray(r.virtual_inputs)) r.virtual_inputs = [];
+  const inputCount = totalInputs || 4;
+  r.virtual_inputs = Array.from({length:inputCount}).map((_,i)=>{
+    const cfg = r.virtual_inputs[i] || {};
+    return {
+      type: cfg.type === "momentary" ? "momentary" : "switch",
+      pulse_ms: Math.min(60000, Math.max(10, Number(cfg.pulse_ms || 250)))
+    };
+  });
   return r;
 }
+
+function renderVirtualInputs(){
+  const grid = $("virtualInputsGrid");
+  if(!grid || !rules) return;
+  grid.innerHTML = rules.virtual_inputs.map((cfg,i)=>{
+    const momentary = cfg.type === "momentary";
+    return `
+      <div class="subcard">
+        <b>VInput ${i+1}</b>
+        <div class="inline" style="margin-top:8px;">
+          <span class="muted">${t("vinput.type","Type")}</span>
+          <select data-vi="${i}" data-field="type" onchange="onVirtualInputChanged(event)">
+            <option value="switch" ${momentary?"":"selected"}>${t("vinput.type_switch","Switch")}</option>
+            <option value="momentary" ${momentary?"selected":""}>${t("vinput.type_momentary","Momentary push button")}</option>
+          </select>
+        </div>
+        <div class="inline" style="margin-top:8px;${momentary?"":"display:none;"}">
+          <span class="muted">${t("vinput.pulse_ms","Pulse")}</span>
+          <input type="number" min="10" max="60000" value="${Number(cfg.pulse_ms || 250)}"
+                 data-vi="${i}" data-field="pulse_ms" onchange="onVirtualInputChanged(event)">
+          <span class="muted">ms</span>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+window.onVirtualInputChanged = (ev)=>{
+  const i = Number(ev.target.dataset.vi);
+  const field = ev.target.dataset.field;
+  if(!rules.virtual_inputs[i]) rules.virtual_inputs[i] = {type:"switch", pulse_ms:250};
+  if(field === "type") rules.virtual_inputs[i].type = ev.target.value === "momentary" ? "momentary" : "switch";
+  if(field === "pulse_ms") rules.virtual_inputs[i].pulse_ms = Math.min(60000, Math.max(10, Number(ev.target.value || 250)));
+  renderVirtualInputs();
+  renderJsonBoxes();
+};
 
 function updateTotalsFromState(s){
   if(!s) return;
@@ -1400,6 +1477,7 @@ function renderJsonBoxes(){
 
 // -------- Load / Save --------
 function renderAll(){
+  renderVirtualInputs();
   renderSimpleRules();
   renderJsonBoxes();
   renderShutterCards();
