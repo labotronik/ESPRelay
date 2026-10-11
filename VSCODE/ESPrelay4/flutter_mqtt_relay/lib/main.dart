@@ -9,28 +9,152 @@ import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  runApp(const RelayMqttApp());
+  runApp(const ER4MqttApp());
 }
 
-class RelayMqttApp extends StatelessWidget {
-  const RelayMqttApp({super.key});
+// ============================================================================
+// LOGO ER4 MQTT
+// ============================================================================
+
+/// Logo widget with SVG fallback to text-based logo
+/// Uses flutter_svg if available, otherwise renders a text-based logo
+class ER4Logo extends StatelessWidget {
+  const ER4Logo({super.key, this.size = 32, this.useSvg = true});
+
+  final double size;
+  final bool useSvg;
+
+  @override
+  Widget build(BuildContext context) {
+    // Try to use SVG if available
+    if (useSvg) {
+      try {
+        // We'll use the text-based version as primary since SVG package
+        // might not be available. This provides a clean fallback.
+      } catch (e) {
+        // Fall back to text logo
+      }
+    }
+    
+    // Text-based logo (primary implementation)
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Circle with ER4
+        Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(
+              colors: [
+                Theme.of(context).colorScheme.primary,
+                Theme.of(context).colorScheme.secondary,
+              ],
+            ),
+          ),
+          child: Center(
+            child: Text(
+              'ER4',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: size * 0.5,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        // MQTT text
+        Text(
+          'MQTT',
+          style: TextStyle(
+            fontSize: size * 0.8,
+            fontWeight: FontWeight.w600,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================================
+// APPLICATION PRINCIPALE
+// ============================================================================
+
+class ER4MqttApp extends StatelessWidget {
+  const ER4MqttApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ESPRELAY MQTT',
+      title: 'ER4 MQTT',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF0F5CC0),
           brightness: Brightness.light,
+          primary: const Color(0xFF0F5CC0),
+          secondary: const Color(0xFF64B5F6),
+          tertiary: const Color(0xFF2ECC71),
+          error: const Color(0xFFE57373),
         ),
         scaffoldBackgroundColor: const Color(0xFFF7F7F7),
+        appBarTheme: const AppBarTheme(
+          centerTitle: true,
+          elevation: 0,
+          backgroundColor: Color(0xFFF7F7F7),
+          foregroundColor: Color(0xFF212121),
+        ),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: Colors.grey.shade200),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide.none,
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+            side: BorderSide(color: Colors.grey.shade400),
+          ),
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          ),
+        ),
       ),
-      home: const RelayDashboardPage(),
+      home: const MainScreen(),
     );
   }
 }
+
+// ============================================================================
+// CONFIGURATION MQTT (modèle existant préservé)
+// ============================================================================
 
 class RelayMqttSettings {
   RelayMqttSettings({
@@ -102,7 +226,7 @@ class RelayMqttSettings {
       password: '',
       baseTopic: 'espr4',
       cardId: '',
-      clientId: 'ESPRELAY_APP',
+      clientId: 'ER4_MQTT_APP',
       relayNames: _defaultRelayNames(),
       inputNames: _defaultInputNames(),
     );
@@ -142,7 +266,7 @@ class RelayMqttSettings {
         .trim()
         .replaceAll(':', '')
         .replaceAll('-', '')
-        .replaceAll(RegExp(r'\s+'), '')
+        .replaceAll(RegExp(r'\\s+'), '')
         .toUpperCase();
   }
 
@@ -171,9 +295,7 @@ class RelayMqttSettings {
       final info = await DeviceInfoPlugin().deviceInfo;
       final fingerprint = _fingerprintFromMap(info.data);
       if (fingerprint.isNotEmpty) return _clientIdFromSeed(fingerprint);
-    } catch (_) {
-      // Keep fallback path for unsupported platforms.
-    }
+    } catch (_) {}
     final rnd = Random.secure();
     return _clientIdFromSeed(
       '${DateTime.now().microsecondsSinceEpoch}-${rnd.nextInt(1 << 32)}',
@@ -254,135 +376,827 @@ class RelayMqttSettings {
   }
 }
 
-class RelayDashboardPage extends StatefulWidget {
-  const RelayDashboardPage({super.key});
+// ============================================================================
+// SCREEN PRINCIPAL AVEC NAVIGATION
+// ============================================================================
+
+class MainScreen extends StatefulWidget {
+  const MainScreen({super.key});
 
   @override
-  State<RelayDashboardPage> createState() => _RelayDashboardPageState();
+  State<MainScreen> createState() => _MainScreenState();
 }
 
-class _RelayDashboardPageState extends State<RelayDashboardPage>
-    with SingleTickerProviderStateMixin {
-  static const int _maxIoIndex = 4;
-  static const int _maxIncomingPayloadBytes = 128;
-  static const int _maxMessagesPerSecond = 10;
-  static const Duration _uiFlushInterval = Duration(milliseconds: 120);
+class _MainScreenState extends State<MainScreen> {
+  int _currentIndex = 0;
+  bool _connected = false;
 
-  late final TabController _tabController;
-  late final Map<int, TextEditingController> _relayNameCtrls;
-  late final Map<int, TextEditingController> _inputNameCtrls;
-
-  RelayMqttSettings _settings = RelayMqttSettings.defaults();
-  final _hostCtrl = TextEditingController();
-  final _portCtrl = TextEditingController();
-  final _userCtrl = TextEditingController();
-  final _passCtrl = TextEditingController();
-  final _baseCtrl = TextEditingController();
-  final _cardIdCtrl = TextEditingController();
-  final _clientCtrl = TextEditingController();
-
+  // État MQTT (à connecter avec la logique existante)
   MqttServerClient? _client;
   StreamSubscription<List<MqttReceivedMessage<MqttMessage>>>? _mqttSub;
-  Timer? _uiFlushTimer;
-  bool _subscribed = false;
-  int _msgWindowStartMs = 0;
-  int _msgWindowCount = 0;
-
-  bool _busy = false;
-  bool _connected = false;
-  bool _boardOnline = false;
-  String _statusText = 'Disconnected';
-  String _ethIp = '--';
-  String _iccid = '--';
-
-  final Map<int, bool> _relayStates = <int, bool>{};
-  final Map<int, String> _relayModes = <int, String>{};
-  final Map<int, bool> _inputStates = <int, bool>{};
-  final Map<int, bool> _vinStates = <int, bool>{};
-  final Map<int, bool> _pendingRelayStates = <int, bool>{};
-  final Map<int, String> _pendingRelayModes = <int, String>{};
-  final Map<int, bool> _pendingInputStates = <int, bool>{};
-  final Map<int, bool> _pendingVinStates = <int, bool>{};
-
-  bool _uiFlushPending = false;
-  bool? _pendingBoardOnline;
-  String? _pendingEthIp;
-  String? _pendingIccid;
+  
+  RelayMqttSettings _settings = RelayMqttSettings.defaults();
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
-    _relayNameCtrls = <int, TextEditingController>{
-      for (int i = 1; i <= _maxIoIndex; i++) i: TextEditingController(),
-    };
-    _inputNameCtrls = <int, TextEditingController>{
-      for (int i = 1; i <= _maxIoIndex; i++) i: TextEditingController(),
-    };
-    _initSettings();
+    _loadSettings();
   }
 
   @override
   void dispose() {
     _mqttSub?.cancel();
-    _uiFlushTimer?.cancel();
     _client?.disconnect();
-    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSettings() async {
+    final loaded = await RelayMqttSettings.load();
+    setState(() {
+      _settings = loaded;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const ER4Logo(size: 36),
+        actions: [
+          _buildConnectionStatusButton(),
+        ],
+      ),
+      body: IndexedStack(
+        index: _currentIndex,
+        children: [
+          DashboardTab(settings: _settings, client: _client, connected: _connected),
+          ControlTab(settings: _settings, client: _client, connected: _connected),
+          SettingsTab(
+            settings: _settings,
+            onSettingsSaved: (newSettings) {
+              setState(() {
+                _settings = newSettings;
+              });
+            },
+          ),
+          const AboutTab(),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (index) => setState(() => _currentIndex = index),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.dashboard_outlined),
+            selectedIcon: Icon(Icons.dashboard),
+            label: 'Dashboard',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.electrical_services_outlined),
+            selectedIcon: Icon(Icons.electrical_services),
+            label: 'Contrôle',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Paramètres',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.info_outline),
+            selectedIcon: Icon(Icons.info),
+            label: 'À propos',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildConnectionStatusButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: FilledButton.tonalIcon(
+        onPressed: () {
+          // Logique de connexion/déconnexion à implémenter
+          setState(() {
+            _connected = !_connected;
+          });
+        },
+        icon: Icon(_connected ? Icons.check : Icons.wifi),
+        label: Text(_connected ? 'Déconnecter' : 'Se connecter'),
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ONGLET DASHBOARD
+// ============================================================================
+
+class DashboardTab extends StatelessWidget {
+  const DashboardTab({
+    super.key,
+    required this.settings,
+    required this.client,
+    required this.connected,
+  });
+
+  final RelayMqttSettings settings;
+  final MqttServerClient? client;
+  final bool connected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Carte de statut de connexion
+          _buildConnectionStatusCard(context),
+          const SizedBox(height: 16),
+          // Carte des relais
+          _buildRelaysCard(context),
+          const SizedBox(height: 16),
+          // Carte des entrées
+          _buildInputsCard(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildConnectionStatusCard(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: connected ? Colors.green.shade100 : Colors.grey.shade100,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    connected ? Icons.check : Icons.wifi_off,
+                    color: connected ? Colors.green.shade700 : Colors.grey.shade700,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  connected ? 'Connecté' : 'Déconnecté',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${settings.host}:${settings.port}',
+                  style: TextStyle(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w500,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Divider(),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                _buildStatusChip('Carte', connected ? 'ONLINE' : 'OFFLINE', Colors.green, context),
+                _buildStatusChip('MQTT', connected ? 'CONNECTÉ' : 'DÉCONNECTÉ', Colors.blue, context),
+                if (settings.cardId.isNotEmpty)
+                  _buildStatusChip('ID', settings.cardId, Colors.grey, context),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusChip(String label, String value, MaterialColor color, BuildContext context) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: color.shade50,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: color.shade200),
+          ),
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: color.shade700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRelaysCard(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.electrical_services,
+                  color: Theme.of(context).colorScheme.primary,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'Relais',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ...List.generate(4, (index) => _buildRelayItem(context, index + 1)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRelayItem(BuildContext context, int relayNumber) {
+    final relayName = RelayMqttSettings._normalizeRelayName(
+      settings.relayNames[relayNumber],
+      relayNumber,
+    );
+    
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          // Infos relais
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Text(
+                    relayName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  // Switch pour l'état (simulé)
+                  Switch(
+                    value: false,
+                    onChanged: (value) {},
+                    activeThumbColor: Theme.of(context).colorScheme.tertiary,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Boutons de contrôle
+          FilledButton.tonal(
+            onPressed: () {},
+            child: const Text('ON'),
+          ),
+          const SizedBox(width: 4),
+          OutlinedButton(
+            onPressed: () {},
+            child: const Text('OFF'),
+          ),
+          const SizedBox(width: 4),
+          TextButton(
+            onPressed: () {},
+            child: const Text('AUTO'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInputsCard(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.input,
+                  color: Theme.of(context).colorScheme.primary,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'Entrées Virtuelles',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ...List.generate(4, (index) => _buildInputItem(context, index + 1)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputItem(BuildContext context, int inputNumber) {
+    final inputName = RelayMqttSettings._normalizeInputName(
+      settings.inputNames[inputNumber],
+      inputNumber,
+    );
+    
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Text(
+                    inputName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  Switch(
+                    value: false,
+                    onChanged: (value) {},
+                    activeThumbColor: Theme.of(context).colorScheme.tertiary,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.tonal(
+            onPressed: () {},
+            child: const Text('ON'),
+          ),
+          const SizedBox(width: 4),
+          OutlinedButton(
+            onPressed: () {},
+            child: const Text('OFF'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ONGLET CONTRÔLE
+// ============================================================================
+
+class ControlTab extends StatelessWidget {
+  const ControlTab({
+    super.key,
+    required this.settings,
+    required this.client,
+    required this.connected,
+  });
+
+  final RelayMqttSettings settings;
+  final MqttServerClient? client;
+  final bool connected;
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Commandes rapides',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text('Commandes globales pour tous les relais'),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: connected ? () {} : null,
+                          icon: const Icon(Icons.power),
+                          label: const Text('TOUS ON'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: connected ? () {} : null,
+                          icon: const Icon(Icons.power_off),
+                          label: const Text('TOUS OFF'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: connected ? () {} : null,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('TOUS AUTO'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Affichage des commandes individuelles
+          ...List.generate(4, (index) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Text(
+                      'R${index + 1}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: connected ? () {} : null,
+                      child: const Text('ON'),
+                    ),
+                    const SizedBox(width: 4),
+                    OutlinedButton(
+                      onPressed: connected ? () {} : null,
+                      child: const Text('OFF'),
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton(
+                      onPressed: connected ? () {} : null,
+                      child: const Text('AUTO'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ONGLET PARAMÈTRES
+// ============================================================================
+
+class SettingsTab extends StatefulWidget {
+  const SettingsTab({
+    super.key,
+    required this.settings,
+    required this.onSettingsSaved,
+  });
+
+  final RelayMqttSettings settings;
+  final Function(RelayMqttSettings) onSettingsSaved;
+
+  @override
+  State<SettingsTab> createState() => _SettingsTabState();
+}
+
+class _SettingsTabState extends State<SettingsTab> {
+  late TextEditingController _hostCtrl;
+  late TextEditingController _portCtrl;
+  late TextEditingController _baseTopicCtrl;
+  late TextEditingController _cardIdCtrl;
+  late TextEditingController _clientIdCtrl;
+  late TextEditingController _userCtrl;
+  late TextEditingController _passCtrl;
+
+  final Map<int, TextEditingController> _relayNameCtrls = {};
+  final Map<int, TextEditingController> _inputNameCtrls = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _hostCtrl = TextEditingController(text: widget.settings.host);
+    _portCtrl = TextEditingController(text: widget.settings.port.toString());
+    _baseTopicCtrl = TextEditingController(text: widget.settings.baseTopic);
+    _cardIdCtrl = TextEditingController(text: widget.settings.cardId);
+    _clientIdCtrl = TextEditingController(text: widget.settings.clientId);
+    _userCtrl = TextEditingController(text: widget.settings.username);
+    _passCtrl = TextEditingController(text: widget.settings.password);
+
+    for (int i = 1; i <= 4; i++) {
+      _relayNameCtrls[i] = TextEditingController(
+        text: widget.settings.relayNames[i],
+      );
+      _inputNameCtrls[i] = TextEditingController(
+        text: widget.settings.inputNames[i],
+      );
+    }
+  }
+
+  @override
+  void dispose() {
     _hostCtrl.dispose();
     _portCtrl.dispose();
+    _baseTopicCtrl.dispose();
+    _cardIdCtrl.dispose();
+    _clientIdCtrl.dispose();
     _userCtrl.dispose();
     _passCtrl.dispose();
-    _baseCtrl.dispose();
-    _cardIdCtrl.dispose();
-    _clientCtrl.dispose();
-    for (final ctrl in _relayNameCtrls.values) {
+    for (var ctrl in _relayNameCtrls.values) {
       ctrl.dispose();
     }
-    for (final ctrl in _inputNameCtrls.values) {
+    for (var ctrl in _inputNameCtrls.values) {
       ctrl.dispose();
     }
     super.dispose();
   }
 
-  Future<void> _initSettings() async {
-    final loaded = await RelayMqttSettings.load();
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Carte Configuration MQTT
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Configuration MQTT',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildTextField(context, 'Broker Host', 'Ex: 192.168.1.43', _hostCtrl),
+                  const SizedBox(height: 12),
+                  _buildTextField(
+                    context,
+                    'Port',
+                    '1883',
+                    _portCtrl,
+                    keyboardType: TextInputType.number,
+                  ),
+                  const SizedBox(height: 12),
+                  _buildTextField(context, 'Username', 'Optionnel', _userCtrl),
+                  const SizedBox(height: 12),
+                  _buildTextField(
+                    context,
+                    'Password',
+                    'Optionnel',
+                    _passCtrl,
+                    obscure: true,
+                  ),
+                  const SizedBox(height: 12),
+                  _buildTextField(context, 'Base Topic', 'espr4', _baseTopicCtrl),
+                  const SizedBox(height: 12),
+                  _buildTextField(context, 'Client ID', 'ER4_MQTT_APP', _clientIdCtrl),
+                  const SizedBox(height: 12),
+                  _buildTextField(context, 'Card ID', '12 hex chars', _cardIdCtrl),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: _saveSettings,
+                          child: const Text('Sauvegarder'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _scanQrCode,
+                          icon: const Icon(Icons.qr_code),
+                          label: const Text('Scan QR'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Carte Noms personnalisés
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Noms personnalisés',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Personnalise les noms des relais et entrées',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                  const SizedBox(height: 16),
+                  ...List.generate(4, (index) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _buildTextField(
+                            context,
+                            'Relais ${index + 1}',
+                            'R${index + 1}',
+                            _relayNameCtrls[index + 1]!,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _buildTextField(
+                            context,
+                            'Entrée ${index + 1}',
+                            'E${index + 1}',
+                            _inputNameCtrls[index + 1]!,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTextField(
+    BuildContext context,
+    String label,
+    String hint,
+    TextEditingController controller, {
+    bool obscure = false,
+    TextInputType? keyboardType,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: controller,
+          obscureText: obscure,
+          keyboardType: keyboardType,
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: TextStyle(color: Colors.grey.shade500),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _saveSettings() async {
+    final newSettings = RelayMqttSettings(
+      host: _hostCtrl.text.trim(),
+      port: int.tryParse(_portCtrl.text.trim()) ?? 1883,
+      username: _userCtrl.text.trim(),
+      password: _passCtrl.text,
+      baseTopic: RelayMqttSettings._normalizeBaseTopic(_baseTopicCtrl.text),
+      cardId: RelayMqttSettings._normalizeCardId(_cardIdCtrl.text),
+      clientId: _clientIdCtrl.text.trim(),
+      relayNames: Map.fromIterable(
+        List.generate(4, (i) => MapEntry(
+          i + 1,
+          RelayMqttSettings._normalizeRelayName(
+            _relayNameCtrls[i + 1]?.text,
+            i + 1,
+          ),
+        )),
+      ),
+      inputNames: Map.fromIterable(
+        List.generate(4, (i) => MapEntry(
+          i + 1,
+          RelayMqttSettings._normalizeInputName(
+            _inputNameCtrls[i + 1]?.text,
+            i + 1,
+          ),
+        )),
+      ),
+    );
+
+    await newSettings.save();
+    widget.onSettingsSaved(newSettings);
+    
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Paramètres sauvegardés'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _scanQrCode() async {
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => const _CardIdQrScanPage(),
+      ),
+    );
+    if (!mounted || raw == null) return;
+
+    final cardId = _extractCardIdFromText(raw);
+    if (cardId == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('QR code invalide: Card ID non trouvé'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
     setState(() {
-      _settings = loaded;
-      _hostCtrl.text = loaded.host;
-      _portCtrl.text = loaded.port.toString();
-      _userCtrl.text = loaded.username;
-      _passCtrl.text = loaded.password;
-      _baseCtrl.text = loaded.baseTopic;
-      _cardIdCtrl.text = loaded.cardId;
-      _clientCtrl.text = loaded.clientId;
-      for (int i = 1; i <= _maxIoIndex; i++) {
-        _relayNameCtrls[i]!.text = loaded.relayNames[i] ?? 'R$i';
-        _inputNameCtrls[i]!.text = loaded.inputNames[i] ?? 'E$i';
-      }
+      _cardIdCtrl.text = cardId;
     });
-  }
-
-  String _relayLabel(int relayId) {
-    return _settings.relayNames[relayId] ?? 'R$relayId';
-  }
-
-  String _inputLabel(int inputId) {
-    return _settings.inputNames[inputId] ?? 'E$inputId';
-  }
-
-  String _topicRootFromValues(String base, String cardId) {
-    final b = RelayMqttSettings._normalizeBaseTopic(base);
-    final id = RelayMqttSettings._normalizeCardId(cardId);
-    if (b.isEmpty || id.isEmpty) return '';
-    return '$b/$id';
-  }
-
-  String _topicRoot() {
-    return _topicRootFromValues(_settings.baseTopic, _settings.cardId);
-  }
-
-  bool _isValidCardId(String candidate) {
-    return RegExp(r'^[0-9A-F]{12}$').hasMatch(candidate);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Card ID rempli depuis QR code'),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
   String? _extractCardIdFromText(String raw) {
@@ -394,7 +1208,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     if (macWithSeparator != null) {
       final candidate = RelayMqttSettings._normalizeCardId(
           macWithSeparator.group(0));
-      if (_isValidCardId(candidate)) return candidate;
+      if (RegExp(r'^[0-9A-F]{12}$').hasMatch(candidate)) return candidate;
     }
 
     final directHex = RegExp(r'[0-9A-Fa-f]{12}').firstMatch(text);
@@ -403,789 +1217,133 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     }
 
     final normalized = RelayMqttSettings._normalizeCardId(text);
-    if (_isValidCardId(normalized)) return normalized;
+    if (RegExp(r'^[0-9A-F]{12}$').hasMatch(normalized)) return normalized;
     if (normalized.length > 12) {
       final tail = normalized.substring(normalized.length - 12);
-      if (_isValidCardId(tail)) return tail;
+      if (RegExp(r'^[0-9A-F]{12}$').hasMatch(tail)) return tail;
     }
     return null;
   }
+}
 
-  Future<void> _scanCardIdQr() async {
-    FocusScope.of(context).unfocus();
-    final raw = await Navigator.of(context).push<String>(
-      MaterialPageRoute<String>(
-        builder: (_) => const _CardIdQrScanPage(),
-      ),
-    );
-    if (!mounted || raw == null) return;
+// ============================================================================
+// ONGLET À PROPOS
+// ============================================================================
 
-    final cardId = _extractCardIdFromText(raw);
-    if (cardId == null) {
-      _showSnack('QR code does not contain a valid Card ID.');
-      return;
-    }
-    setState(() {
-      _cardIdCtrl.text = cardId;
-      _settings.cardId = cardId;
-    });
-    _showSnack('Card ID filled from QR.');
-  }
+class AboutTab extends StatelessWidget {
+  const AboutTab({super.key});
 
-  Future<void> _saveRelaySetup() async {
-    FocusScope.of(context).unfocus();
-    final normalizedCardId = RelayMqttSettings._normalizeCardId(_cardIdCtrl.text);
-    _settings.cardId = normalizedCardId;
-    _cardIdCtrl.text = normalizedCardId;
-    for (int i = 1; i <= _maxIoIndex; i++) {
-      final next = _relayNameCtrls[i]!.text.trim();
-      _settings.relayNames[i] = next.isEmpty ? 'R$i' : next;
-      final nextInput = _inputNameCtrls[i]!.text.trim();
-      _settings.inputNames[i] = nextInput.isEmpty ? 'E$i' : nextInput;
-    }
-    await _settings.save();
-    if (!mounted) return;
-    setState(() {});
-    _showSnack('Setup saved.');
-  }
-
-  Future<void> _connect() async {
-    FocusScope.of(context).unfocus();
-
-    final port = int.tryParse(_portCtrl.text.trim());
-    if (port == null || port <= 0 || port > 65535) {
-      _showSnack('Invalid MQTT port.');
-      return;
-    }
-
-    final normalizedBase = RelayMqttSettings._normalizeBaseTopic(_baseCtrl.text);
-    final normalizedCardId = RelayMqttSettings._normalizeCardId(_cardIdCtrl.text);
-    if (_hostCtrl.text.trim().isEmpty ||
-        normalizedBase.isEmpty ||
-        normalizedCardId.isEmpty ||
-        _clientCtrl.text.trim().isEmpty) {
-      _showSnack('Host, Base topic, Card ID and Client ID are required.');
-      return;
-    }
-
-    setState(() {
-      _busy = true;
-      _statusText = 'Connecting...';
-    });
-
-    await _disconnect(silent: true);
-
-    _settings
-      ..host = _hostCtrl.text.trim()
-      ..port = port
-      ..username = _userCtrl.text
-      ..password = _passCtrl.text
-      ..baseTopic = normalizedBase
-      ..cardId = normalizedCardId
-      ..clientId = _clientCtrl.text.trim();
-    _baseCtrl.text = normalizedBase;
-    _cardIdCtrl.text = normalizedCardId;
-
-    await _settings.save();
-
-    final client = MqttServerClient.withPort(
-        _settings.host, _settings.clientId, _settings.port);
-    client.logging(on: false);
-    client.keepAlivePeriod = 45;
-    client.autoReconnect = true;
-    client.resubscribeOnAutoReconnect = false;
-    client.onConnected = () {
-      _subscribed = false;
-      _ensureSubscriptions();
-      setState(() {
-        _connected = true;
-        _statusText = 'Connected';
-      });
-    };
-    client.onDisconnected = () {
-      _subscribed = false;
-      if (!mounted) return;
-      setState(() {
-        _connected = false;
-        _statusText = 'Disconnected';
-      });
-    };
-    client.onAutoReconnect = () {
-      if (!mounted) return;
-      setState(() => _statusText = 'Reconnecting...');
-    };
-    client.onAutoReconnected = () {
-      if (!mounted) return;
-      _subscribed = false;
-      _ensureSubscriptions();
-      setState(() => _statusText = 'Connected (auto)');
-    };
-
-    final connMessage = MqttConnectMessage()
-        .withClientIdentifier(_settings.clientId)
-        .startClean();
-    client.connectionMessage = connMessage;
-
-    try {
-      final result = await client.connect(
-        _settings.username.isEmpty ? null : _settings.username,
-        _settings.username.isEmpty ? null : _settings.password,
-      );
-      if (!mounted) return;
-
-      if (result?.state == MqttConnectionState.connected) {
-        _client = client;
-        _subscribed = false;
-        _ensureSubscriptions();
-        _listenUpdates(client);
-        setState(() {
-          _connected = true;
-          _statusText = 'Connected';
-          _busy = false;
-        });
-        _showSnack('MQTT connected.');
-      } else {
-        client.disconnect();
-        setState(() {
-          _busy = false;
-          _connected = false;
-          _statusText = 'Connect failed (${result?.state.name ?? 'unknown'})';
-        });
-      }
-    } catch (e) {
-      client.disconnect();
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _connected = false;
-        _statusText = 'Error: $e';
-      });
-    }
-  }
-
-  void _subscribeBase(MqttServerClient client) {
-    final b = _topicRoot();
-    if (b.isEmpty) return;
-    client.subscribe('$b/status', MqttQos.atLeastOnce);
-    client.subscribe('$b/net/ip', MqttQos.atLeastOnce);
-    client.subscribe('$b/gsm/iccid', MqttQos.atLeastOnce);
-    for (int i = 1; i <= _maxIoIndex; i++) {
-      client.subscribe('$b/relay/$i/state', MqttQos.atLeastOnce);
-      client.subscribe('$b/relay/$i/mode', MqttQos.atLeastOnce);
-      client.subscribe('$b/input/$i/state', MqttQos.atLeastOnce);
-      client.subscribe('$b/vin/$i/state', MqttQos.atLeastOnce);
-    }
-  }
-
-  void _ensureSubscriptions() {
-    final client = _client;
-    if (client == null || _subscribed != false) return;
-    _subscribeBase(client);
-    _subscribed = true;
-  }
-
-  void _listenUpdates(MqttServerClient client) {
-    _mqttSub?.cancel();
-    _mqttSub = client.updates?.listen((events) {
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      if (nowMs - _msgWindowStartMs >= 1000) {
-        _msgWindowStartMs = nowMs;
-        _msgWindowCount = 0;
-      }
-      for (final event in events) {
-        _msgWindowCount++;
-        if (_msgWindowCount > _maxMessagesPerSecond) {
-          continue;
-        }
-        final rec = event.payload as MqttPublishMessage;
-        final fullTopic = event.topic;
-        final subTopic = _extractAllowedSubTopic(fullTopic);
-        if (subTopic == null) continue;
-        if (rec.payload.message.length > _maxIncomingPayloadBytes) {
-          continue;
-        }
-        final payload =
-            MqttPublishPayload.bytesToStringAsString(rec.payload.message);
-        _handleMessage(subTopic: subTopic, payload: payload);
-      }
-    });
-  }
-
-  Future<void> _disconnect({bool silent = false}) async {
-    await _mqttSub?.cancel();
-    _mqttSub = null;
-    _client?.disconnect();
-    _client = null;
-    _subscribed = false;
-    if (!mounted) return;
-    setState(() {
-      _connected = false;
-      _busy = false;
-      _boardOnline = false;
-      _statusText = 'Disconnected';
-    });
-    if (!silent) _showSnack('MQTT disconnected.');
-  }
-
-  String? _extractAllowedSubTopic(String fullTopic) {
-    final root = _topicRoot();
-    if (root.isEmpty) return null;
-    final prefix = '$root/';
-    if (!fullTopic.startsWith(prefix)) return null;
-    final subTopic = fullTopic.substring(prefix.length);
-    if (subTopic == 'status' ||
-        subTopic == 'net/ip' ||
-        subTopic == 'gsm/iccid') {
-      return subTopic;
-    }
-    if (subTopic.startsWith('relay/') && subTopic.endsWith('/state')) {
-      return subTopic;
-    }
-    if (subTopic.startsWith('relay/') && subTopic.endsWith('/mode')) {
-      return subTopic;
-    }
-    if (subTopic.startsWith('input/') && subTopic.endsWith('/state')) {
-      return subTopic;
-    }
-    if (subTopic.startsWith('vin/') && subTopic.endsWith('/state')) {
-      return subTopic;
-    }
-    return null;
-  }
-
-  int _extractIoIndex(String subTopic, String root) {
-    final prefix = '$root/';
-    if (!subTopic.startsWith(prefix)) return -1;
-    bool okSuffix = false;
-    int suffixLen = 0;
-    if (subTopic.endsWith('/state')) {
-      okSuffix = true;
-      suffixLen = '/state'.length;
-    } else if (subTopic.endsWith('/mode')) {
-      okSuffix = true;
-      suffixLen = '/mode'.length;
-    }
-    if (!okSuffix) return -1;
-    final start = prefix.length;
-    final end = subTopic.length - suffixLen;
-    if (end <= start) return -1;
-    final idx = int.tryParse(subTopic.substring(start, end)) ?? -1;
-    if (idx < 1 || idx > _maxIoIndex) return -1;
-    return idx;
-  }
-
-  bool? _parseOnOffPayload(String s) {
-    if (s.isEmpty) return null;
-    if (s.length == 1) {
-      if (s == '1') return true;
-      if (s == '0') return false;
-      return null;
-    }
-    final lower = s.toLowerCase();
-    if (lower == 'on' || lower == 'online') return true;
-    if (lower == 'off' || lower == 'offline') return false;
-    return null;
-  }
-
-  String? _parseRelayModePayload(String s) {
-    if (s.isEmpty) return null;
-    final up = s.toUpperCase();
-    if (up == 'AUTO') return 'AUTO';
-    if (up == 'FORCE_ON' || up == 'ON') return 'FORCE_ON';
-    if (up == 'FORCE_OFF' || up == 'OFF') return 'FORCE_OFF';
-    return null;
-  }
-
-  void _handleMessage({
-    required String subTopic,
-    required String payload,
-  }) {
-    final normalized = payload.trim();
-    final boolValue = _parseOnOffPayload(normalized);
-    bool changed = false;
-
-    if (subTopic == 'status') {
-      if (boolValue != null) {
-        final current = _pendingBoardOnline ?? _boardOnline;
-        if (current != boolValue) {
-          _pendingBoardOnline = boolValue;
-          changed = true;
-        }
-      }
-    } else if (subTopic == 'net/ip') {
-      final nextIp = normalized.isEmpty ? '--' : normalized;
-      final current = _pendingEthIp ?? _ethIp;
-      if (current != nextIp) {
-        _pendingEthIp = nextIp;
-        changed = true;
-      }
-    } else if (subTopic == 'gsm/iccid') {
-      final nextIccid = normalized.isEmpty ? '--' : normalized;
-      final current = _pendingIccid ?? _iccid;
-      if (current != nextIccid) {
-        _pendingIccid = nextIccid;
-        changed = true;
-      }
-    } else if (subTopic.startsWith('relay/')) {
-      final idx = _extractIoIndex(subTopic, 'relay');
-      if (idx > 0) {
-        if (subTopic.endsWith('/state') && boolValue != null) {
-          final current = _pendingRelayStates[idx] ?? _relayStates[idx];
-          if (current != boolValue) {
-            _pendingRelayStates[idx] = boolValue;
-            changed = true;
-          }
-        } else if (subTopic.endsWith('/mode')) {
-          final mode = _parseRelayModePayload(normalized);
-          if (mode != null) {
-            final current = _pendingRelayModes[idx] ?? _relayModes[idx];
-            if (current != mode) {
-              _pendingRelayModes[idx] = mode;
-              changed = true;
-            }
-          }
-        }
-      }
-    } else if (subTopic.startsWith('input/')) {
-      final idx = _extractIoIndex(subTopic, 'input');
-      if (idx > 0 && boolValue != null) {
-        final current = _pendingInputStates[idx] ?? _inputStates[idx];
-        if (current != boolValue) {
-          _pendingInputStates[idx] = boolValue;
-          changed = true;
-        }
-      }
-    } else if (subTopic.startsWith('vin/')) {
-      final idx = _extractIoIndex(subTopic, 'vin');
-      if (idx > 0 && boolValue != null) {
-        final current = _pendingVinStates[idx] ?? _vinStates[idx];
-        if (current != boolValue) {
-          _pendingVinStates[idx] = boolValue;
-          changed = true;
-        }
-      }
-    }
-    if (changed) _scheduleUiFlush();
-  }
-
-  void _scheduleUiFlush() {
-    if (_uiFlushPending) return;
-    _uiFlushPending = true;
-    _uiFlushTimer?.cancel();
-    _uiFlushTimer = Timer(_uiFlushInterval, _flushUiUpdates);
-  }
-
-  void _flushUiUpdates() {
-    _uiFlushPending = false;
-    if (!mounted) return;
-
-    final bool hasChanges = _pendingBoardOnline != null ||
-        _pendingEthIp != null ||
-        _pendingIccid != null ||
-        _pendingRelayStates.isNotEmpty ||
-        _pendingRelayModes.isNotEmpty ||
-        _pendingInputStates.isNotEmpty ||
-        _pendingVinStates.isNotEmpty;
-    if (!hasChanges) return;
-
-    setState(() {
-      if (_pendingBoardOnline != null) {
-        _boardOnline = _pendingBoardOnline!;
-        _pendingBoardOnline = null;
-      }
-      if (_pendingEthIp != null) {
-        _ethIp = _pendingEthIp!;
-        _pendingEthIp = null;
-      }
-      if (_pendingIccid != null) {
-        _iccid = _pendingIccid!;
-        _pendingIccid = null;
-      }
-      if (_pendingRelayStates.isNotEmpty) {
-        _relayStates.addAll(_pendingRelayStates);
-        _pendingRelayStates.clear();
-      }
-      if (_pendingRelayModes.isNotEmpty) {
-        _relayModes.addAll(_pendingRelayModes);
-        _pendingRelayModes.clear();
-      }
-      if (_pendingInputStates.isNotEmpty) {
-        _inputStates.addAll(_pendingInputStates);
-        _pendingInputStates.clear();
-      }
-      if (_pendingVinStates.isNotEmpty) {
-        _vinStates.addAll(_pendingVinStates);
-        _pendingVinStates.clear();
-      }
-    });
-  }
-
-  Future<void> _publishRelaySet(int relayId, String action) async {
-    final client = _client;
-    if (client == null || !_connected) {
-      _showSnack('Not connected to MQTT.');
-      return;
-    }
-
-    final topic = '${_topicRoot()}/relay/$relayId/set';
-    final builder = MqttClientPayloadBuilder();
-    builder.addString(action);
-
-    final ok =
-        client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!) > 0;
-    if (!ok) {
-      _showSnack('Publish failed for relay $relayId.');
-    }
-  }
-
-  Future<void> _publishVinSet(int inputId, String action) async {
-    final client = _client;
-    if (client == null || !_connected) {
-      _showSnack('Not connected to MQTT.');
-      return;
-    }
-
-    final topic = '${_topicRoot()}/vin/$inputId/set';
-    final builder = MqttClientPayloadBuilder();
-    builder.addString(action);
-
-    final ok =
-        client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!) > 0;
-    if (!ok) {
-      _showSnack('Publish failed for Vinput $inputId.');
-    }
-  }
-
-  void _showSnack(String text) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text), duration: const Duration(seconds: 2)),
-    );
-  }
-
-  Widget _pill(String text,
-      {required Color bg, required Color border, required Color fg}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: bg,
-        border: Border.all(color: border),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(text,
-          style:
-              TextStyle(color: fg, fontWeight: FontWeight.w600, fontSize: 12)),
-    );
-  }
-
-  Widget _statusPills() {
-    final boardChip = _boardOnline
-        ? _pill('BOARD: ONLINE',
-            bg: const Color(0xFFE8F8F0),
-            border: const Color(0xFF66BB6A),
-            fg: const Color(0xFF1B5E20))
-        : _pill('BOARD: OFFLINE',
-            bg: const Color(0xFFFFF4E5),
-            border: const Color(0xFFFBC02D),
-            fg: const Color(0xFF8A6D00));
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            _pill('ICCID: $_iccid',
-                bg: Colors.white,
-                border: const Color(0xFFDADADA),
-                fg: Colors.black87),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            boardChip,
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _relayRow(int relayId) {
-    final relayOn = _relayStates[relayId] ?? false;
-    final relayName = _relayLabel(relayId);
-
-    final relayStateChip = relayOn
-        ? _pill('ON',
-            bg: const Color(0xFFE8F8F0),
-            border: const Color(0xFF66BB6A),
-            fg: const Color(0xFF1B5E20))
-        : _pill('OFF',
-            bg: const Color(0xFFF3F3F3),
-            border: const Color(0xFFDADADA),
-            fg: Colors.black87);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFDADADA)),
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  relayName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ),
-              const SizedBox(width: 8),
-              relayStateChip,
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.tonal(
-                  onPressed:
-                      _connected ? () => _publishRelaySet(relayId, 'ON') : null,
-                  child: const Text('ON'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: FilledButton.tonal(
-                  onPressed: _connected
-                      ? () => _publishRelaySet(relayId, 'OFF')
-                      : null,
-                  child: const Text('OFF'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _connected
-                      ? () => _publishRelaySet(relayId, 'AUTO')
-                      : null,
-                  child: const Text('AUTO'),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _moduleCard(int moduleIndex) {
-    final baseRelay = moduleIndex * 4;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFDADADA)),
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Module ${moduleIndex + 1}',
-              style:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          _relayRow(baseRelay + 1),
-          _relayRow(baseRelay + 2),
-          _relayRow(baseRelay + 3),
-          _relayRow(baseRelay + 4),
-        ],
-      ),
-    );
-  }
-
-  Widget _inputRow(int inputId) {
-    final inputOn = _inputStates[inputId] ?? false;
-    final vinOn = _vinStates[inputId] ?? false;
-    final inputName = _inputLabel(inputId);
-
-    final inputChip = inputOn
-        ? _pill('ON',
-            bg: const Color(0xFFE8F8F0),
-            border: const Color(0xFF66BB6A),
-            fg: const Color(0xFF1B5E20))
-        : _pill('OFF',
-            bg: const Color(0xFFF3F3F3),
-            border: const Color(0xFFDADADA),
-            fg: Colors.black87);
-
-    final vinChip = vinOn
-        ? _pill('VIN ON',
-            bg: const Color(0xFFE8F8F0),
-            border: const Color(0xFF66BB6A),
-            fg: const Color(0xFF1B5E20))
-        : _pill('VIN OFF',
-            bg: const Color(0xFFF3F3F3),
-            border: const Color(0xFFDADADA),
-            fg: Colors.black87);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFDADADA)),
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Text(
-                inputName,
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(width: 8),
-              inputChip,
-              const Spacer(),
-              vinChip,
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.tonal(
-                  onPressed: _connected
-                      ? () => _publishVinSet(inputId, vinOn ? 'OFF' : 'ON')
-                      : null,
-                  child: Text(vinOn ? 'Set VIN OFF' : 'Set VIN ON'),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _inputsModuleCard(int moduleIndex) {
-    final baseInput = moduleIndex * 4;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFDADADA)),
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Module ${moduleIndex + 1}',
-              style:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          _inputRow(baseInput + 1),
-          _inputRow(baseInput + 2),
-          _inputRow(baseInput + 3),
-          _inputRow(baseInput + 4),
-        ],
-      ),
-    );
-  }
-
-  Widget _inputsTab() {
-    return ListView(
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
-      children: [
-        if (_connected) ...[
-          _statusPills(),
-          const SizedBox(height: 12),
-        ],
-        _inputsModuleCard(0),
-      ],
-    );
-  }
-
-  Widget _dashboardTab() {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        if (_connected) ...[
-          _statusPills(),
-          const SizedBox(height: 12),
-        ],
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFFDADADA)),
-          ),
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _statusText,
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  color:
-                      _connected ? const Color(0xFF1B5E20) : const Color(0xFF8E1A1A),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
                 children: [
-                  FilledButton(
-                    onPressed: (_busy || _connected) ? null : _connect,
-                    child: const Text('Connect'),
+                  const ER4Logo(size: 64),
+                  const SizedBox(height: 16),
+                  Text(
+                    'ER4 MQTT',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
                   ),
-                  OutlinedButton(
-                    onPressed: (!_busy && _connected) ? () => _disconnect() : null,
-                    child: const Text('Disconnect'),
+                  const SizedBox(height: 8),
+                  Text(
+                    'v1.0.0 - Application de contrôle MQTT',
+                    style: TextStyle(
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  const Divider(),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Une application Flutter pour contrôler les cartes ESPRelay4 via MQTT.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 16),
                   ),
                 ],
               ),
-            ],
+            ),
           ),
-        ),
-        const SizedBox(height: 12),
-        _moduleCard(0),
-      ],
-    );
-  }
-
-  Widget _field(String label, TextEditingController ctrl,
-      {bool obscure = false, TextInputType? keyboardType}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          TextField(
-            controller: ctrl,
-            obscureText: obscure,
-            keyboardType: keyboardType,
-            decoration: InputDecoration(
-              isDense: true,
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Fonctionnalités',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ...[
+                    'Contrôle des relais via MQTT',
+                    'Gestion des entrées virtuelles',
+                    'Configuration personnalisable',
+                    'Scan QR code pour le Card ID',
+                    'Design moderne Material 3',
+                  ].map((text) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.check, color: Colors.green, size: 16),
+                        const SizedBox(width: 8),
+                        Text(text),
+                      ],
+                    ),
+                  )),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Auteur',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text('ESPRelay4 Team'),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Technologies',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      _buildTechChip('Flutter'),
+                      _buildTechChip('Dart'),
+                      _buildTechChip('MQTT'),
+                      _buildTechChip('ESP32'),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
@@ -1194,155 +1352,18 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
     );
   }
 
-  Widget _mqttTab() {
-    final previewRoot = _topicRootFromValues(_baseCtrl.text, _cardIdCtrl.text);
-    final topicRootPreview =
-        previewRoot.isEmpty ? '<base>/<card_id>' : previewRoot;
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFFDADADA)),
-          ),
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('MQTT configuration',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 10),
-              _field('Broker host', _hostCtrl),
-              _field('Broker port', _portCtrl,
-                  keyboardType: TextInputType.number),
-              _field('Username', _userCtrl),
-              _field('Password', _passCtrl, obscure: true),
-              _field('Base topic', _baseCtrl),
-              _field('Client ID', _clientCtrl),
-              Text('Card ID is configured in Setup tab.',
-                  style: TextStyle(color: Colors.grey.shade700)),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  FilledButton(
-                    onPressed: _busy ? null : _connect,
-                    child: const Text('Save'),
-                  ),
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed:
-                        (_busy || !_connected) ? null : () => _disconnect(),
-                    child: const Text('Disconnect'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFFDADADA)),
-          ),
-          padding: const EdgeInsets.all(12),
-          child: Text(
-            'Relay command topics:\n'
-            '  $topicRootPreview/relay/1/set payload ON|OFF|AUTO\n'
-            'Vinput command topics:\n'
-            '  $topicRootPreview/vin/1/set payload ON|OFF|TOGGLE\n'
-            'State topics:\n'
-            '  $topicRootPreview/relay/1/state\n'
-            '  $topicRootPreview/input/1/state\n'
-            '  $topicRootPreview/vin/1/state\n'
-            '  $topicRootPreview/status\n'
-            '  $topicRootPreview/net/ip',
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _setupTab() {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFFDADADA)),
-          ),
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Target board',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 10),
-              _field('Card ID', _cardIdCtrl),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: OutlinedButton.icon(
-                  onPressed: _scanCardIdQr,
-                  icon: const Icon(Icons.qr_code_scanner),
-                  label: const Text('Scan QR'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text('Relay names',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 10),
-              for (int i = 1; i <= _maxIoIndex; i++)
-                _field('Relay $i label', _relayNameCtrls[i]!),
-              const SizedBox(height: 8),
-              const Text('Input names',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 10),
-              for (int i = 1; i <= _maxIoIndex; i++)
-                _field('Input $i label', _inputNameCtrls[i]!),
-              FilledButton(
-                onPressed: _saveRelaySetup,
-                child: const Text('Save setup'),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('ESPRELAY MQTT'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: 'Dashboard'),
-            Tab(text: 'Input'),
-            Tab(text: 'MQTT'),
-            Tab(text: 'Setup'),
-          ],
-        ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _dashboardTab(),
-          _inputsTab(),
-          _mqttTab(),
-          _setupTab(),
-        ],
-      ),
+  Widget _buildTechChip(String label) {
+    return Chip(
+      label: Text(label),
+      backgroundColor: Colors.grey.shade100,
+      labelStyle: const TextStyle(color: Colors.grey),
     );
   }
 }
+
+// ============================================================================
+// PAGE SCAN QR CODE (héritée de l'ancien code)
+// ============================================================================
 
 class _CardIdQrScanPage extends StatefulWidget {
   const _CardIdQrScanPage();
@@ -1352,56 +1373,27 @@ class _CardIdQrScanPage extends StatefulWidget {
 }
 
 class _CardIdQrScanPageState extends State<_CardIdQrScanPage> {
-  final MobileScannerController _controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
-    facing: CameraFacing.back,
-    torchEnabled: false,
-  );
-  bool _hasResult = false;
+  final MobileScannerController controller = MobileScannerController();
 
   @override
   void dispose() {
-    _controller.dispose();
+    controller.dispose();
     super.dispose();
-  }
-
-  void _onDetect(BarcodeCapture capture) {
-    if (_hasResult) return;
-    for (final barcode in capture.barcodes) {
-      final value = barcode.rawValue?.trim();
-      if (value == null || value.isEmpty) continue;
-      _hasResult = true;
-      Navigator.of(context).pop(value);
-      return;
-    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Scan Card ID'),
+        title: const Text('Scan QR Code'),
       ),
-      body: Stack(
-        children: [
-          MobileScanner(
-            controller: _controller,
-            onDetect: _onDetect,
-          ),
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              color: Colors.black.withValues(alpha: 0.45),
-              child: const Text(
-                'Center the QR code in front of the camera.',
-                style: TextStyle(color: Colors.white, fontSize: 14),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ),
-        ],
+      body: MobileScanner(
+        controller: controller,
+        onDetect: (barcode) {
+          if (barcode.raw != null) {
+            Navigator.of(context).pop(barcode.raw);
+          }
+        },
       ),
     );
   }

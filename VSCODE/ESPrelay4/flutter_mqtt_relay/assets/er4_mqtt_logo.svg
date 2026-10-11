@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="48" viewBox="0 0 120 48">
+  <!-- Fond bleu électrique pour ER4 -->
+  <rect x="0" y="0" width="44" height="44" rx="10" fill="#0F5CC0"/>
+  
+  <!-- Texte ER4 en blanc -->
+  <text x="22" y="26" font-family="Roboto, Arial, sans-serif" font-size="18" font-weight="bold" fill="white" text-anchor="middle">ER4</text>
+  
+  <!-- Texte MQTT à côté -->
+  <text x="52" y="26" font-family="Roboto, Arial, sans-serif" font-size="16" font-weight="400" fill="#0F5CC0" text-anchor="start">MQTT</text>
+  
+  <!-- Éclair décoratif -->
+  <path d="M8 12 L14 28 L6 28 Z" fill="#2ECC71"/>
+</svg>
