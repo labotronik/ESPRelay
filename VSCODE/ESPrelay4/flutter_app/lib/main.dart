@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -19,12 +20,69 @@ String? _extractSuffixFromService(Guid serviceUuid) {
   return suffix.length == 12 ? suffix : null;
 }
 
+Map<String, dynamic>? parseBleState(String raw) {
+  try {
+    final obj = jsonDecode(raw);
+    if (obj is Map<String, dynamic>) return obj;
+  } catch (_) {/* Incomplete or malformed BLE frame. */}
+  return null;
+}
+
+/// Buffers bytes until a complete RS-RS / US frame is available.
+/// Decoding after framing also preserves UTF-8 characters split across BLE packets.
+class BleStateFrame {
+  const BleStateFrame(this.payload, this.state);
+  final String payload;
+  final Map<String, dynamic> state;
+}
+
+class BleStateFramer {
+  final List<int> _buffer = [];
+  void clear() => _buffer.clear();
+  List<BleStateFrame> add(List<int> bytes) {
+    _buffer.addAll(bytes);
+    final frames = <BleStateFrame>[];
+    while (_buffer.isNotEmpty) {
+      var start = -1;
+      for (var i = 0; i + 1 < _buffer.length; i++) {
+        if (_buffer[i] == 0x1e && _buffer[i + 1] == 0x1e) {
+          start = i;
+          break;
+        }
+      }
+      if (start < 0) {
+        final trailingStart = _buffer.last == 0x1e;
+        _buffer.clear();
+        if (trailingStart) _buffer.add(0x1e);
+        break;
+      }
+      if (start > 0) _buffer.removeRange(0, start);
+      final end = _buffer.indexOf(0x1f, 2);
+      if (end < 0) {
+        if (_buffer.length > 16384) _buffer.clear();
+        break;
+      }
+      if (end <= 16384) {
+        try {
+          final payload = utf8.decode(_buffer.sublist(2, end));
+          final state = parseBleState(payload);
+          if (state != null) frames.add(BleStateFrame(payload, state));
+        } catch (_) {/* Skip an invalid UTF-8 frame and accept the next one. */}
+      }
+      _buffer.removeRange(0, end + 1);
+    }
+    return frames;
+  }
+}
+
 void main() {
   runApp(const EspRelayApp());
 }
 
 class EspRelayApp extends StatelessWidget {
-  const EspRelayApp({super.key});
+  const EspRelayApp({super.key, this.autoScan = true, this.adapterStates});
+  final bool autoScan;
+  final Stream<BluetoothAdapterState>? adapterStates;
 
   @override
   Widget build(BuildContext context) {
@@ -34,13 +92,15 @@ class EspRelayApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0C7C59)),
       ),
-      home: const BleHomePage(),
+      home: BleHomePage(autoScan: autoScan, adapterStates: adapterStates),
     );
   }
 }
 
 class BleHomePage extends StatefulWidget {
-  const BleHomePage({super.key});
+  const BleHomePage({super.key, this.autoScan = true, this.adapterStates});
+  final bool autoScan;
+  final Stream<BluetoothAdapterState>? adapterStates;
 
   @override
   State<BleHomePage> createState() => _BleHomePageState();
@@ -56,125 +116,153 @@ class _BleHomePageState extends State<BleHomePage> {
   BluetoothDevice? _device;
   BluetoothCharacteristic? _stateChar;
   BluetoothCharacteristic? _stateReadChar;
-  Guid? _serviceUuid;
   Guid? _stateCharUuid;
   Guid? _stateReadCharUuid;
-  String _stateJson = '--';
   String _stateMeta = '';
   String _status = 'Idle';
   Map<String, dynamic> _state = {};
-  String _rxBuffer = '';
+  final BleStateFramer _framer = BleStateFramer();
   bool _scanning = false;
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
-  String _permStatus = '';
   int _lastFrameMs = 0;
+  int _operation = 0;
+  bool _disposed = false;
+  bool _connecting = false;
+  bool _reading = false;
+
+  bool _current(int operation) =>
+      mounted && !_disposed && operation == _operation;
+  void _update(VoidCallback change) {
+    if (mounted && !_disposed) setState(change);
+  }
 
   @override
   void initState() {
     super.initState();
-    _adapterSub = FlutterBluePlus.adapterState.listen((s) {
-      setState(() => _adapterState = s);
+    _adapterSub =
+        (widget.adapterStates ?? FlutterBluePlus.adapterState).listen((s) {
+      _update(() => _adapterState = s);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startScan();
+      if (mounted && widget.autoScan) _startScan();
     });
   }
 
   @override
   void dispose() {
+    _disposed = true;
     _notifySub?.cancel();
     _pollTimer?.cancel();
     _scanSub?.cancel();
     _adapterSub?.cancel();
-    _disconnect();
+    unawaited(_disconnect(updateUi: false));
     super.dispose();
   }
 
   Future<void> _startScan() async {
-    if (_scanning) return;
-    final permsOk = await _ensurePermissions();
-    if (!permsOk) {
-      setState(() => _status = 'Permissions required');
-      return;
-    }
-    _results.clear();
-    setState(() {
-      _scanning = true;
-      _status = 'Scanning...';
-    });
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
-    _scanSub?.cancel();
-    _scanSub = FlutterBluePlus.scanResults.listen((results) {
-      for (final r in results) {
-        final advName = r.advertisementData.advName;
-        final name =
-            r.device.platformName.isNotEmpty ? r.device.platformName : advName;
-        final isTarget = name.contains(kTargetName);
-        final idx =
-            _results.indexWhere((e) => e.device.remoteId == r.device.remoteId);
-        if (idx >= 0) {
-          _results[idx] = r;
-        } else {
-          // If target name is missing (some devices hide it), still show the device.
-          if (isTarget || name.isNotEmpty) _results.add(r);
-        }
+    if (_scanning || _connecting || _disposed) return;
+    final operation = _operation;
+    _scanning = true; // Reserve the operation before awaiting permissions.
+    try {
+      final permsOk = await _ensurePermissions();
+      if (!_current(operation)) return;
+      if (!permsOk) {
+        _update(() => _status = 'Permissions required');
+        return;
       }
-      setState(() {});
-    });
-    await Future.delayed(const Duration(seconds: 5));
-    await FlutterBluePlus.stopScan();
-    setState(() {
-      _scanning = false;
-      _status = _results.isEmpty ? 'No device found' : 'Scan complete';
-    });
+      _results.clear();
+      _update(() => _status = 'Scanning...');
+      await _scanSub?.cancel();
+      if (!_current(operation)) return;
+      _scanSub = FlutterBluePlus.scanResults.listen((results) {
+        if (!_current(operation)) return;
+        for (final r in results) {
+          final name = r.device.platformName.isNotEmpty
+              ? r.device.platformName
+              : r.advertisementData.advName;
+          final idx = _results
+              .indexWhere((e) => e.device.remoteId == r.device.remoteId);
+          if (idx >= 0) {
+            _results[idx] = r;
+          } else if (name.isNotEmpty) {
+            _results.add(r);
+          }
+        }
+        _update(() {});
+      });
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+      if (!_current(operation)) {
+        await FlutterBluePlus.stopScan();
+        return;
+      }
+      await Future<void>.delayed(const Duration(seconds: 5));
+      if (!_current(operation)) return;
+      await FlutterBluePlus.stopScan();
+      if (!_current(operation)) return;
+      _update(() =>
+          _status = _results.isEmpty ? 'No device found' : 'Scan complete');
+    } catch (_) {
+      if (_current(operation)) _update(() => _status = 'Scan failed');
+    } finally {
+      if (_current(operation)) _update(() => _scanning = false);
+    }
   }
 
   Future<bool> _ensurePermissions() async {
     if (Theme.of(context).platform == TargetPlatform.android) {
-      final scan = await Permission.bluetoothScan.request();
-      final connect = await Permission.bluetoothConnect.request();
-      final loc = await Permission.locationWhenInUse.request();
-      final ok = scan.isGranted && connect.isGranted && loc.isGranted;
-      setState(() {
-        _permStatus =
-            'scan=${scan.isGranted ? "ok" : "no"} connect=${connect.isGranted ? "ok" : "no"} location=${loc.isGranted ? "ok" : "no"}';
-      });
-      return ok;
+      final sdk = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
+      if (sdk >= 31) {
+        final scan = await Permission.bluetoothScan.request();
+        final connect = await Permission.bluetoothConnect.request();
+        return scan.isGranted && connect.isGranted;
+      }
+      return (await Permission.locationWhenInUse.request()).isGranted;
     }
     return true;
   }
 
   Future<void> _connect(ScanResult result) async {
-    await FlutterBluePlus.stopScan();
-    setState(() {
-      _scanning = false;
-      _status = 'Connecting...';
-    });
-    _device = result.device;
-    _serviceUuid = null;
-    _stateReadCharUuid = null;
-    _stateCharUuid = null;
-    _lastFrameMs = 0;
-    await _device!
-        .connect(timeout: const Duration(seconds: 10), autoConnect: false);
+    if (_connecting || _disposed) return;
+    _connecting = true;
+    await _disconnect();
+    if (_disposed || !mounted) return;
+    final operation = _operation;
+    final device = result.device;
+    _device = device;
+    _update(() => _status = 'Connecting...');
     try {
-      await _device!.requestMtu(185);
+      await FlutterBluePlus.stopScan();
+      if (!_current(operation)) return;
+      await device.connect(
+          timeout: const Duration(seconds: 10), autoConnect: false);
+      if (!_current(operation)) {
+        await device.disconnect();
+        return;
+      }
+      try {
+        await device.requestMtu(185);
+      } catch (_) {/* Optional MTU. */}
+      if (!_current(operation)) return;
+      _update(() => _status = 'Discovering services...');
+      await _discover(operation, device);
     } catch (_) {
-      // ignore
+      if (_current(operation)) {
+        await _disconnect();
+        _update(() => _status = 'Connection failed');
+      }
+    } finally {
+      _connecting = false;
     }
-    setState(() => _status = 'Discovering services...');
-    await _discover();
   }
 
-  Future<void> _discover() async {
-    if (_device == null) return;
-    final services = await _device!.discoverServices();
+  Future<void> _discover(int operation, BluetoothDevice device) async {
+    final services = await device.discoverServices();
+    if (!_current(operation)) return;
     BluetoothCharacteristic? chNotify;
     BluetoothCharacteristic? chRead;
     for (final s in services) {
       final suffix = _extractSuffixFromService(s.uuid);
       if (suffix == null) continue;
-      _serviceUuid = s.uuid;
       _stateCharUuid = _uuidFor('03', suffix);
       _stateReadCharUuid = _uuidFor('04', suffix);
       for (final c in s.characteristics) {
@@ -187,7 +275,7 @@ class _BleHomePageState extends State<BleHomePage> {
       if (chNotify != null || chRead != null) break;
     }
     if (chNotify == null && chRead == null) {
-      setState(() => _status = 'State characteristic not found');
+      _update(() => _status = 'State characteristic not found');
       return;
     }
     _stateChar = chNotify;
@@ -195,11 +283,13 @@ class _BleHomePageState extends State<BleHomePage> {
 
     if (_stateChar != null) {
       await _stateChar!.setNotifyValue(true);
+      if (!_current(operation)) return;
     }
-    _notifySub?.cancel();
+    await _notifySub?.cancel();
+    if (!_current(operation)) return;
     if (_stateChar != null) {
       _notifySub = _stateChar!.lastValueStream.listen((data) {
-        _consumeNotifyFrame(data);
+        if (_current(operation)) _consumeNotifyFrame(data);
       });
     }
 
@@ -208,12 +298,13 @@ class _BleHomePageState extends State<BleHomePage> {
       await _readStateChar();
     } else if (_stateChar != null) {
       final value = await _stateChar!.read();
-      _consumeNotifyFrame(value);
+      if (_current(operation)) _consumeNotifyFrame(value);
     }
 
+    if (!_current(operation)) return;
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      if (_device == null) return;
+      if (!_current(operation) || _device == null) return;
       final now = DateTime.now().millisecondsSinceEpoch;
       // If notifications are not flowing, poll the read characteristic.
       if (now - _lastFrameMs > 3000) {
@@ -222,45 +313,34 @@ class _BleHomePageState extends State<BleHomePage> {
     });
 
     if (_state.isEmpty) {
-      setState(() => _status = 'Connected (no data yet)');
+      _update(() => _status = 'Connected (no data yet)');
     }
   }
 
   void _consumeNotifyFrame(List<int> data) {
-    if (data.isEmpty) return;
-    _rxBuffer += utf8.decode(data, allowMalformed: true);
-    if (_rxBuffer.length > 16384) {
-      _rxBuffer = '';
-      return;
-    }
-    final startIdx = _rxBuffer.indexOf('\u001E\u001E');
-    if (startIdx < 0) return;
-    final endIdx = _rxBuffer.indexOf('\u001F', startIdx + 2);
-    if (endIdx < 0) return;
-    final payload = _rxBuffer.substring(startIdx + 2, endIdx);
-    final parsed = _tryParseJson(payload);
-    if (parsed != null) {
-      setState(() {
-        _stateJson = payload;
-        _stateMeta = 'notify len=${payload.length}';
-        _state = parsed;
+    if (_disposed || !mounted || data.isEmpty) return;
+    for (final frame in _framer.add(data)) {
+      _update(() {
+        _stateMeta = 'notify len=${frame.payload.length}';
+        _state = frame.state;
         _status = 'Connected';
       });
       _lastFrameMs = DateTime.now().millisecondsSinceEpoch;
     }
-    _rxBuffer = _rxBuffer.substring(endIdx + 1);
   }
 
   Future<void> _readStateChar() async {
-    if (_stateReadChar == null) return;
+    final characteristic = _stateReadChar;
+    if (characteristic == null || _reading || _disposed) return;
+    final operation = _operation;
+    _reading = true;
     try {
-      final value = await _stateReadChar!.read();
-      if (value.isEmpty) return;
+      final value = await characteristic.read();
+      if (!_current(operation) || value.isEmpty) return;
       final txt = utf8.decode(value, allowMalformed: true);
-      final parsed = _tryParseJson(txt);
+      final parsed = parseBleState(txt);
       if (parsed != null) {
-        setState(() {
-          _stateJson = txt;
+        _update(() {
           _stateMeta = 'read len=${value.length}';
           _state = parsed;
           _status = 'Connected';
@@ -268,16 +348,10 @@ class _BleHomePageState extends State<BleHomePage> {
         _lastFrameMs = DateTime.now().millisecondsSinceEpoch;
       }
     } catch (_) {
-      // ignore read errors in fallback poll
+      // A read can fail while a device disconnects.
+    } finally {
+      _reading = false;
     }
-  }
-
-  Map<String, dynamic>? _tryParseJson(String raw) {
-    try {
-      final obj = jsonDecode(raw);
-      if (obj is Map<String, dynamic>) return obj;
-    } catch (_) {}
-    return null;
   }
 
   String _formatUptime(int ms) {
@@ -286,8 +360,9 @@ class _BleHomePageState extends State<BleHomePage> {
     final h = (total % 86400) ~/ 3600;
     final m = (total % 3600) ~/ 60;
     final s = total % 60;
-    if (d > 0)
+    if (d > 0) {
       return '${d}d ${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    }
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
@@ -669,24 +744,36 @@ class _BleHomePageState extends State<BleHomePage> {
     );
   }
 
-  Future<void> _disconnect() async {
+  Future<void> _disconnect({bool updateUi = true}) async {
+    ++_operation; // Invalidate reads, discovery and notification callbacks first.
+    final device = _device;
+    final notify = _notifySub;
+    final scan = _scanSub;
+    _notifySub = null;
+    _scanSub = null;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _device = null;
+    _stateChar = null;
+    _stateReadChar = null;
+    _stateCharUuid = null;
+    _stateReadCharUuid = null;
+    _framer.clear();
+    _lastFrameMs = 0;
+    _scanning = false;
+    if (updateUi) _update(() => _status = 'Disconnected');
     try {
-      await _notifySub?.cancel();
-      _notifySub = null;
-      _pollTimer?.cancel();
-      _pollTimer = null;
-      if (_device != null) {
-        await _device!.disconnect();
-      }
-    } catch (_) {
-      // ignore
-    }
-    setState(() {
-      _device = null;
-      _stateChar = null;
-      _stateReadChar = null;
-      _status = 'Disconnected';
-    });
+      await notify?.cancel();
+    } catch (_) {}
+    try {
+      await scan?.cancel();
+    } catch (_) {}
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+    try {
+      await device?.disconnect();
+    } catch (_) {}
   }
 
   Widget _buildScanList() {

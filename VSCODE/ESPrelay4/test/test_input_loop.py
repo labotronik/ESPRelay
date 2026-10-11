@@ -19,7 +19,7 @@ bool inputs[1]={}, prevInputs[1]={}, virtualInputs[1]={};
 bool combinedInputs[1]={}, prevCombinedInputs[1]={};
 bool mqttFastCommandPending=false;
 uint32_t now=100, deadline=0;
-bool command=false, blockMqtt=false, output=false, toggle=false;
+bool command=false, bleCommand=false, blockMqtt=false, output=false, toggle=false;
 int evaluations=0, rises=0;
 void handleHttp() {} void pcaReadInputs() {} void debounceInputs() {}
 void virtualInputTick() {
@@ -32,6 +32,12 @@ void mqttLoop() {
   }
   if(blockMqtt) now+=20;
 }
+void bleProcessCommands() {
+  if(bleCommand) {
+    virtualInputs[0]=true; deadline=now+10;
+    mqttFastCommandPending=true; bleCommand=false;
+  }
+}
 void shutterTick() {}
 void evalSimpleRules() {
   ++evaluations;
@@ -40,7 +46,7 @@ void evalSimpleRules() {
   }
 }
 void buildFinalRelays() {} void pcaApplyRelays() {}
-void updateWifiState() {} void heartbeatTick() {} void bleTick() {}
+void mqttPublishControlStates() {} void ethernetMaintainTick() {} void updateWifiState() {} void heartbeatTick() {} void bleTick() {}
 """
 checks = r"""
 int main() {
@@ -52,6 +58,10 @@ int main() {
   // A second press creates exactly one more edge; holding creates none.
   command=true; loop(); assert(rises==2 && !toggle);
   loop(); assert(rises==2 && evaluations==4);
+  now+=20; loop(); assert(!combinedInputs[0]);
+  // BLE pulses are consumed by the same input evaluation, exactly once.
+  bleCommand=true; loop(); assert(rises==3 && toggle);
+  loop(); assert(rises==3);
   now+=20; loop(); assert(!combinedInputs[0]);
   // Physical OR virtual: an already active physical input masks the edge.
   inputs[0]=true; loop(); int before=rises;

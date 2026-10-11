@@ -12,9 +12,11 @@ par USB.
    `ESPRELAY_OTA_USER` et `ESPRELAY_OTA_PASSWORD` peuvent remplacer ces valeurs.
 3. Dans VS Code, ouvrir **PlatformIO → Project Tasks → esp32s3_custom_n4_ethernet**.
 4. Utiliser **General → Build** pour compiler, puis **General → Upload** pour
-   compiler et envoyer le firmware par Ethernet. Après son redémarrage, PlatformIO
-   sauvegarde les réglages, génère une image LittleFS avec la nouvelle interface
-   et ces réglages, puis l'envoie automatiquement. La carte redémarre une seconde fois.
+   compiler, sauvegarder les réglages actuels puis envoyer le firmware par Ethernet.
+   Après vérification du redémarrage et de la version, PlatformIO génère une image
+   LittleFS avec la nouvelle interface et les réglages sauvegardés avant l’envoi,
+   puis l’envoie automatiquement. La carte redémarre une seconde fois et les
+   réglages restaurés sont vérifiés.
 
 L'environnement `esp32s3_custom_n4` conserve le téléversement USB habituel.
 Sélectionner l'environnement Ethernet dans la barre PlatformIO pour utiliser
@@ -36,11 +38,13 @@ pio run -e esp32s3_custom_n4_ethernet -t uploadfs
 ```
 
 L'envoi Ethernet conserve réseau, MQTT, règles, WiFi, BLE et identifiants :
-le script récupère `/api/backup` et ajoute ces fichiers à une copie temporaire
+le script récupère `/api/backup` avant le premier upload et ajoute ces fichiers à une copie temporaire
 de `data/` avant de créer l'image à envoyer. Les fichiers du projet restent
 inchangés. Si la sauvegarde est inaccessible ou incomplète, l'envoi LittleFS
 est annulé. Le firmware doit inclure les champs WiFi et BLE dans sa sauvegarde ;
-un **Upload** de cette version l'installe avant l'envoi automatique de LittleFS.
+si le firmware installé ne fournit pas WiFi/BLE dans l’export, la procédure
+s’arrête avant tout upload. Installer d’abord un firmware compatible par USB,
+après avoir sauvegardé les réglages existants.
 Les autres fichiers personnalisés présents uniquement sur la carte ne sont pas
 conservés. Recharger la page avec Ctrl + F5 après la mise à jour.
 
@@ -56,3 +60,19 @@ authentification et contrôle SHA-256. Le protocole est HTTP, comme l'interface
 de la carte.
 
 L'intégration utilise le [protocole custom de PlatformIO](https://docs.platformio.org/en/latest/projectconf/sections/env/options/upload/upload_command.html).
+
+Les sauvegardes durables sont stockées dans `.pio/ota-backups/`, avec un nom
+unique et des permissions `0600` sur Unix (répertoire `0700`). Elles contiennent
+les mots de passe. Elles restent disponibles même si l’upload ou sa vérification
+échoue. Pour restaurer, importer la section `settings` du fichier dans l’interface
+web : l’enveloppe complète contient également destination et identité de la carte.
+Un upload filesystem seul vérifie la version déjà installée, indépendamment de
+la version du code local. Le transfert automatique vérifie la version du firmware
+envoyé. Aucune erreur de vérification n’est assimilée à une réussite.
+
+Les paramètres sont désormais enregistrés dans un document atomique
+`/settings.json` (schéma interne 1), distinct des fichiers JSON historiques.
+L’image Ethernet contient les deux formats pour assurer la compatibilité.
+L’import/export HTTP utilise le schéma 2 et couvre règles, réseau, MQTT, WiFi, BLE
+et identifiants HTTP. Un import historique sans schéma conserve les sections
+auxiliaires absentes ; un import de schéma 2 exige les six sections.

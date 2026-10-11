@@ -2,8 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'ble_protocol.dart';
+import 'ble_card_reader.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -559,10 +563,12 @@ class _CardsHomePageState extends State<CardsHomePage> {
 }
 
 class CardEditPage extends StatefulWidget {
-  const CardEditPage({super.key, this.initialCard, this.initialBleScan});
+  const CardEditPage({super.key, this.initialCard, this.initialBleScan,
+    this.bleStateReader = readBleCardState});
 
   final EspCard? initialCard;
   final BleScanResult? initialBleScan;
+  final Future<Map<String, dynamic>> Function(BluetoothDevice, String) bleStateReader;
 
   @override
   State<CardEditPage> createState() => _CardEditPageState();
@@ -590,7 +596,8 @@ class _CardEditPageState extends State<CardEditPage> {
   bool _bleFetchBusy = false;
   double _bleFetchProgress = 0;
   String _bleFetchStatus = '';
-  TransportPolicy? _lastBlePolicyHint;
+  bool _applyMqttSettings = false;
+  String _bleCardInfo = '';
 
   @override
   void initState() {
@@ -679,59 +686,46 @@ class _CardEditPageState extends State<CardEditPage> {
   }
 
   Future<void> _handleBleSelection(BleScanResult result) async {
-    if (!mounted || _importBusy) return;
-    final messenger = ScaffoldMessenger.of(context);
-    _cardIdCtrl.text = result.cardId;
-    if (_nameCtrl.text.trim().isEmpty || _nameCtrl.text.trim() == 'Nouvelle carte') {
-      _nameCtrl.text = result.suggestedName;
-    }
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Connexion BLE puis récupération de la configuration...'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-
-    _setBleProgress(0.05, 'Connexion BLE...');
+    if (!mounted || _importBusy || _bleFetchBusy) return;
+    setState(() {
+      _cardIdCtrl.text = result.cardId;
+      if (_nameCtrl.text.trim().isEmpty || _nameCtrl.text.trim() == 'Nouvelle carte') {
+        _nameCtrl.text = result.suggestedName;
+      }
+      _policy = TransportPolicy.ble;
+      _applyMqttSettings = false;
+    });
+    _setBleProgress(0.1, 'Lecture des informations de la carte en BLE...');
     try {
-      final bleHost = await _readHttpHostFromBle(
-        result,
-        onProgress: (p, s) => _setBleProgress(p, s),
-      );
+      final state = await widget.bleStateReader(result.device, result.cardId);
       if (!mounted) return;
-      final blePolicyHint = _lastBlePolicyHint;
-      if (blePolicyHint != null && blePolicyHint != TransportPolicy.ble) {
-        setState(() => _policy = blePolicyHint);
+      if (EspCard.normalizeCardId((state['device_id'] ?? '').toString()) != result.cardId) {
+        throw StateError('La carte BLE ne correspond pas au Card ID');
       }
-      if (bleHost == null || bleHost.isEmpty) {
-        _clearBleProgress();
-        if (blePolicyHint != null) {
-          _snack(
-            'Mode MQTT actif détecté via BLE: ${transportPolicyCompactLabel(blePolicyHint)}',
-          );
-        }
-        _snack('IP non récupérée via BLE. Refaire le scan BLE.');
-        return;
-      }
-      _httpHostCtrl.text = bleHost;
-      final modeSuffix = (blePolicyHint == null)
-          ? ''
-          : ' | mode ${transportPolicyCompactLabel(blePolicyHint)}';
-      _setBleProgress(1.0, 'IP trouvée: $bleHost$modeSuffix');
-      await Future<void>.delayed(const Duration(milliseconds: 250));
-      _clearBleProgress();
-
-      final ok = await _askWebAccessDialog(bleHost);
-      if (!mounted || !ok) return;
-      final allowImport = await _warnIfVpnLikelyEnabled();
-      if (!mounted || !allowImport) return;
-      FocusManager.instance.primaryFocus?.unfocus();
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-      if (!mounted) return;
-      await _importFromCardHttp();
+      setState(() {
+        final eth = state['eth'];
+        final ip = eth is Map ? (eth['ip'] ?? '').toString() : '';
+        if (ip.isNotEmpty && ip != '0.0.0.0') _httpHostCtrl.text = ip;
+        _bleCardInfo = '${state['total_relays'] ?? 4} sorties · '
+            '${state['total_inputs'] ?? 4} entrées · Firmware ${state['fw'] ?? '--'}';
+      });
+      _snack('Informations récupérées en BLE. La carte peut être enregistrée.');
+    } catch (e) {
+      if (mounted) _snack('Lecture BLE impossible : $e. Réessayer le scan.');
     } finally {
-      if (mounted && _bleFetchBusy) _clearBleProgress();
+      _clearBleProgress();
     }
+  }
+
+  Future<void> _importHttpSettings() async {
+    final host = _httpHostCtrl.text.trim();
+    if (host.isEmpty) {
+      _snack('Renseigne l’IP ou l’hôte HTTP de la carte.');
+      return;
+    }
+    if (!await _askWebAccessDialog(host) || !mounted) return;
+    if (!await _warnIfVpnLikelyEnabled() || !mounted) return;
+    await _importFromCardHttp();
   }
 
   Future<bool> _askWebAccessDialog(String host) async {
@@ -750,308 +744,6 @@ class _CardEditPageState extends State<CardEditPage> {
     _httpUserCtrl.text = result.user.trim();
     _httpPassCtrl.text = result.pass;
     return true;
-  }
-
-  Map<String, dynamic>? _parseBleStateJson(String raw) {
-    try {
-      final obj = jsonDecode(raw);
-      if (obj is Map<String, dynamic>) return obj;
-    } catch (_) {
-      // try framed payload below
-    }
-    final start = raw.indexOf('\u001E\u001E');
-    if (start < 0) return null;
-    final end = raw.indexOf('\u001F', start + 2);
-    if (end <= start + 2) return null;
-    final payload = raw.substring(start + 2, end);
-    try {
-      final obj = jsonDecode(payload);
-      if (obj is Map<String, dynamic>) return obj;
-    } catch (_) {}
-    return null;
-  }
-
-  bool _isUsableHost(String raw) {
-    final v = raw.trim();
-    if (v.isEmpty) return false;
-    if (v == '--' || v == '0.0.0.0') return false;
-    if (v.toLowerCase() == 'null') return false;
-    return true;
-  }
-
-  bool _bleFieldToBool(dynamic value) {
-    final lower = value?.toString().trim().toLowerCase() ?? '';
-    return lower == '1' || lower == 'true' || lower == 'on' || lower == 'yes';
-  }
-
-  TransportPolicy? _policyFromBleStateJson(Map<String, dynamic> parsed) {
-    final eth = parsed['eth'];
-    final gsm = parsed['gsm'];
-    final ethLink = (eth is Map) ? _bleFieldToBool(eth['link']) : false;
-    final gsmReady = (gsm is Map)
-        ? (_bleFieldToBool(gsm['ready']) ||
-            (_bleFieldToBool(gsm['network']) && _bleFieldToBool(gsm['data'])))
-        : false;
-    final mqtt = parsed['mqtt'];
-    if (mqtt is! Map) {
-      if (!ethLink && gsmReady) return TransportPolicy.gsm;
-      if (ethLink && !gsmReady) return TransportPolicy.local;
-      return null;
-    }
-    final active = (mqtt['active_transport'] ?? '').toString().trim().toLowerCase();
-    final activeHasEth = active.contains('ethernet') || active.contains('eth');
-    final activeHasGsm = active.contains('gsm');
-    final onGsm = _bleFieldToBool(mqtt['on_gsm']);
-    final ethConnected = _bleFieldToBool(mqtt['eth_connected']);
-    final gsmConnected =
-        _bleFieldToBool(mqtt['gsm_connected']) || onGsm;
-    // Ethernet link physically down: prioritize GSM, even if stale ETH MQTT flags remain.
-    if (!ethLink && (gsmReady || gsmConnected || activeHasGsm)) {
-      return TransportPolicy.gsm;
-    }
-    if (activeHasEth && activeHasGsm) {
-      return ethLink ? TransportPolicy.local : TransportPolicy.gsm;
-    }
-    if (active == 'ethernet' || active == 'eth' || active == 'local' || activeHasEth) {
-      return TransportPolicy.local;
-    }
-    if (active == 'gsm' || activeHasGsm) return TransportPolicy.gsm;
-    if (ethConnected && !gsmConnected) return TransportPolicy.local;
-    if (gsmConnected) return TransportPolicy.gsm;
-    if (!ethLink && gsmReady) return TransportPolicy.gsm;
-    if (ethLink && !gsmReady) return TransportPolicy.local;
-    return null;
-  }
-
-  String? _extractHttpHostFromBleJson(Map<String, dynamic> parsed) {
-    final candidates = <String>[];
-
-    void addCandidate(dynamic value) {
-      if (value == null) return;
-      candidates.add(value.toString().trim());
-    }
-
-    final eth = parsed['eth'];
-    if (eth is Map) addCandidate(eth['ip']);
-    final wifi = parsed['wifi'];
-    if (wifi is Map) addCandidate(wifi['ip']);
-    final mqtt = parsed['mqtt'];
-    if (mqtt is Map) addCandidate(mqtt['ip']);
-    addCandidate(parsed['ip']);
-
-    for (final c in candidates) {
-      if (_isUsableHost(c)) return c;
-    }
-    return null;
-  }
-
-  String? _extractHttpHostFromBleBytes(List<int> value) {
-    if (value.isEmpty) return null;
-    final txt = utf8.decode(value, allowMalformed: true);
-    final parsed = _parseBleStateJson(txt);
-    if (parsed != null) {
-      _lastBlePolicyHint = _policyFromBleStateJson(parsed) ?? _lastBlePolicyHint;
-      final fromJson = _extractHttpHostFromBleJson(parsed);
-      if (fromJson != null) return fromJson;
-    }
-    return _extractIpFromStateText(txt);
-  }
-
-  String? _extractIpFromStateText(String raw) {
-    // Keep fallback strict to avoid picking random GSM/operator fields.
-    final candidates = <String?>[
-      RegExp(
-        r'"eth"\s*:\s*\{[^{}]*"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"',
-      ).firstMatch(raw)?.group(1),
-      RegExp(
-        r'"wifi"\s*:\s*\{[^{}]*"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"',
-      ).firstMatch(raw)?.group(1),
-      RegExp(
-        r'"mqtt"\s*:\s*\{[^{}]*"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"',
-      ).firstMatch(raw)?.group(1),
-      RegExp(r'"ip"\s*:\s*"(\d{1,3}(?:\.\d{1,3}){3})"')
-          .firstMatch(raw)
-          ?.group(1),
-    ];
-    for (final c in candidates) {
-      final ip = _validateIpv4(c);
-      if (ip != null) return ip;
-    }
-    return null;
-  }
-
-  String? _validateIpv4(String? raw) {
-    if (raw == null) return null;
-    final ip = raw.trim();
-    if (!_isUsableHost(ip)) return null;
-    final parts = ip.split('.');
-    if (parts.length != 4) return null;
-    for (final p in parts) {
-      final n = int.tryParse(p);
-      if (n == null || n < 0 || n > 255) return null;
-    }
-    return ip;
-  }
-
-  String? _extractHttpHostFromNotifyBuffer(List<int> buffer) {
-    if (buffer.isEmpty) return null;
-
-    // Framed payload: 0x1E 0x1E + json + 0x1F
-    const int fs = 0x1E;
-    const int fe = 0x1F;
-    int start = -1;
-    for (int i = 0; i + 1 < buffer.length; i++) {
-      if (buffer[i] == fs && buffer[i + 1] == fs) {
-        start = i + 2;
-        break;
-      }
-    }
-    if (start < 0) return null;
-    int end = -1;
-    for (int i = start; i < buffer.length; i++) {
-      if (buffer[i] == fe) {
-        end = i;
-        break;
-      }
-    }
-    if (end <= start) return null;
-    final framed = buffer.sublist(start, end);
-    return _extractHttpHostFromBleBytes(framed);
-  }
-
-  Future<String?> _readHostFromNotify(
-    BluetoothCharacteristic notifyChar,
-    void Function(double progress, String status)? onProgress,
-  ) async {
-    final buffer = <int>[];
-    StreamSubscription<List<int>>? sub;
-    try {
-      final completer = Completer<String?>();
-      sub = notifyChar.onValueReceived.listen((chunk) {
-        if (chunk.isEmpty || completer.isCompleted) return;
-        buffer.addAll(chunk);
-        // Keep only data after the latest frame-start marker.
-        const int fs = 0x1E;
-        int latestStart = -1;
-        for (int i = 0; i + 1 < buffer.length; i++) {
-          if (buffer[i] == fs && buffer[i + 1] == fs) {
-            latestStart = i;
-          }
-        }
-        if (latestStart > 0) {
-          buffer.removeRange(0, latestStart);
-        }
-        // keep bounded buffer
-        if (buffer.length > 4096) {
-          buffer.removeRange(0, buffer.length - 4096);
-        }
-        final host = _extractHttpHostFromNotifyBuffer(buffer);
-        if (host != null && !completer.isCompleted) {
-          completer.complete(host);
-        }
-      });
-
-      onProgress?.call(0.85, 'Lecture notifications BLE...');
-      await notifyChar.setNotifyValue(true);
-      final host = await completer.future.timeout(
-        const Duration(seconds: 4),
-        onTimeout: () => null,
-      );
-      return host;
-    } catch (_) {
-      return null;
-    } finally {
-      try {
-        await notifyChar.setNotifyValue(false);
-      } catch (_) {}
-      await sub?.cancel();
-    }
-  }
-
-  Future<String?> _readHttpHostFromBle(
-    BleScanResult result, {
-    void Function(double progress, String status)? onProgress,
-  }) async {
-    _lastBlePolicyHint = null;
-    final device = result.device;
-    final suffix = result.cardId;
-    final serviceExpected = result.serviceUuid ?? bleUuidFor('01', suffix);
-    final readUuid = bleUuidFor('04', suffix);
-    final notifyUuid = bleUuidFor('03', suffix);
-    bool connectedHere = false;
-
-    try {
-      onProgress?.call(0.10, 'Connexion à la carte...');
-      try {
-        await device.connect(
-          timeout: const Duration(seconds: 8),
-          autoConnect: false,
-        );
-        connectedHere = true;
-      } catch (_) {
-        // already connected or temporary connect race
-      }
-
-      try {
-        await device.requestMtu(185);
-      } catch (_) {
-        // optional
-      }
-
-      onProgress?.call(0.25, 'Découverte des services BLE...');
-      final services = await device.discoverServices();
-      BluetoothService? service;
-      for (final s in services) {
-        if (s.uuid == serviceExpected) {
-          service = s;
-          break;
-        }
-      }
-      service ??= services.isNotEmpty ? services.first : null;
-      if (service == null) return null;
-
-      BluetoothCharacteristic? readChar;
-      BluetoothCharacteristic? notifyChar;
-      for (final c in service.characteristics) {
-        if (c.uuid == readUuid) readChar = c;
-        if (c.uuid == notifyUuid) notifyChar = c;
-      }
-      if (readChar == null && notifyChar == null) return null;
-
-      if (readChar != null) {
-        // Firmware updates this characteristic every second after BLE connect.
-        // Retry a few times to avoid getting "{}" too early.
-        for (int attempt = 0; attempt < 6; attempt++) {
-          onProgress?.call(
-            0.40 + (attempt * 0.06),
-            'Lecture état BLE (${attempt + 1}/6)...',
-          );
-          if (attempt > 0) {
-            await Future<void>.delayed(const Duration(milliseconds: 650));
-          }
-          final value = await readChar.read();
-          final host = _extractHttpHostFromBleBytes(value);
-          if (host != null) return host;
-        }
-      }
-      if (notifyChar != null) {
-        onProgress?.call(0.80, 'Attente des données BLE...');
-        final host = await _readHostFromNotify(
-          notifyChar,
-          onProgress,
-        );
-        if (host != null) return host;
-      }
-      return null;
-    } catch (_) {
-      return null;
-    } finally {
-      if (connectedHere) {
-        try {
-          await device.disconnect();
-        } catch (_) {}
-      }
-    }
   }
 
   Uri _buildCardApiUri(String hostInput, String path) {
@@ -1415,11 +1107,11 @@ class _CardEditPageState extends State<CardEditPage> {
       _snack('Le nom de la carte est requis.');
       return;
     }
-    if (localPort == null || localPort <= 0 || localPort > 65535) {
+    if (_policy != TransportPolicy.ble && (localPort == null || localPort <= 0 || localPort > 65535)) {
       _snack('Port MQTT local invalide.');
       return;
     }
-    if (gsmPort == null || gsmPort <= 0 || gsmPort > 65535) {
+    if (_policy != TransportPolicy.ble && (gsmPort == null || gsmPort <= 0 || gsmPort > 65535)) {
       _snack('Port MQTT GSM invalide.');
       return;
     }
@@ -1432,11 +1124,11 @@ class _CardEditPageState extends State<CardEditPage> {
       httpUser: _httpUserCtrl.text.trim(),
       httpPass: _httpPassCtrl.text,
       localHost: _localHostCtrl.text.trim(),
-      localPort: localPort,
+      localPort: localPort ?? 1883,
       localUser: _localUserCtrl.text.trim(),
       localPass: _localPassCtrl.text,
       gsmHost: _gsmHostCtrl.text.trim(),
-      gsmPort: gsmPort,
+      gsmPort: gsmPort ?? 1883,
       gsmUser: _gsmUserCtrl.text.trim(),
       gsmPass: _gsmPassCtrl.text,
       retain: _retain,
@@ -1446,7 +1138,8 @@ class _CardEditPageState extends State<CardEditPage> {
     final host = _httpHostCtrl.text.trim();
     setState(() => _saveBusy = true);
     try {
-      if (host.isNotEmpty) {
+      if (_applyMqttSettings && _policy != TransportPolicy.ble) {
+        if (host.isEmpty) throw StateError('Hôte HTTP requis pour appliquer la configuration MQTT');
         String transportValue;
         switch (_policy) {
           case TransportPolicy.local:
@@ -1549,7 +1242,7 @@ class _CardEditPageState extends State<CardEditPage> {
                   ),
                   const SizedBox(height: 10),
                   _field('Nom carte', _nameCtrl),
-                  _field('Card ID (MAC12 sans :)', _cardIdCtrl),
+                  _field('Card ID', _cardIdCtrl),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
@@ -1566,6 +1259,10 @@ class _CardEditPageState extends State<CardEditPage> {
                       ),
                     ],
                   ),
+                  if (_bleCardInfo.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(_bleCardInfo),
+                  ],
                   if (_bleFetchBusy) ...[
                     const SizedBox(height: 10),
                     LinearProgressIndicator(
@@ -1601,6 +1298,7 @@ class _CardEditPageState extends State<CardEditPage> {
                   ),
                   const SizedBox(height: 8),
                   DropdownButtonFormField<TransportPolicy>(
+                    key: ValueKey(_policy),
                     initialValue: _policy,
                     isExpanded: true,
                     items: TransportPolicy.values
@@ -1632,9 +1330,10 @@ class _CardEditPageState extends State<CardEditPage> {
                     ),
                   ),
                   const SizedBox(height: 10),
+                  if (_policy != TransportPolicy.ble)
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('MQTT retain'),
+                    title: const Text('Conserver les états MQTT de la carte'),
                     value: _retain,
                     onChanged: (v) => setState(() => _retain = v),
                   ),
@@ -1642,6 +1341,12 @@ class _CardEditPageState extends State<CardEditPage> {
               ),
             ),
           ),
+          if (_policy == TransportPolicy.ble)
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('Connexion directe en BLE. Aucun accès Ethernet, Wi-Fi ou MQTT requis.'),
+            ),
+          if (_policy != TransportPolicy.ble) ...[
           const SizedBox(height: 10),
           Card(
             elevation: 0,
@@ -1654,6 +1359,21 @@ class _CardEditPageState extends State<CardEditPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  _field('Hôte HTTP de la carte (facultatif)', _httpHostCtrl),
+                  OutlinedButton.icon(
+                    onPressed: (_importBusy || _bleFetchBusy) ? null : _importHttpSettings,
+                    icon: const Icon(Icons.download),
+                    label: const Text('Importer la configuration par le réseau'),
+                  ),
+                  if (_policy != TransportPolicy.ble)
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Appliquer la configuration MQTT à la carte'),
+                      subtitle: const Text('Nécessite un accès réseau à la carte.'),
+                      value: _applyMqttSettings,
+                      onChanged: (value) => setState(() => _applyMqttSettings = value),
+                    ),
+                  const SizedBox(height: 10),
                   const Text('MQTT Local',
                       style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                   const SizedBox(height: 10),
@@ -1690,12 +1410,13 @@ class _CardEditPageState extends State<CardEditPage> {
               ),
             ),
           ),
+          ],
         ],
       ),
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(12, 0, 12, 12),
         child: FilledButton.icon(
-          onPressed: _saveBusy ? null : _save,
+          onPressed: (_saveBusy || _bleFetchBusy || _importBusy) ? null : _save,
           icon: _saveBusy
               ? const SizedBox(
                   width: 16,
@@ -1846,7 +1567,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
   late CardSession _session;
   late final PageController _detailsPageCtrl;
   int _detailsPage = 0;
-  bool _bleConnectSyncBusy = false;
+  bool _connectionBusy = false;
   String _bleDetectedMode = '--';
 
   @override
@@ -2018,13 +1739,14 @@ class _CardDetailPageState extends State<CardDetailPage> {
     bool connectedHere = false;
 
     try {
-      try {
+      if (!device.isConnected) {
+        await FlutterBluePlus.stopScan();
         await device.connect(
           timeout: const Duration(seconds: 8),
           autoConnect: false,
         );
         connectedHere = true;
-      } catch (_) {}
+      }
 
       try {
         await device.requestMtu(185);
@@ -2075,9 +1797,23 @@ class _CardDetailPageState extends State<CardDetailPage> {
     }
   }
 
+  Future<void> _toggleConnection() async {
+    if (_connectionBusy || _session.connecting) return;
+    if (!_session.hasConnection) {
+      await _connectWithBleSync();
+      return;
+    }
+    setState(() => _connectionBusy = true);
+    try {
+      await _session.disconnect();
+    } finally {
+      if (mounted) setState(() => _connectionBusy = false);
+    }
+  }
+
   Future<void> _connectWithBleSync() async {
-    if (_bleConnectSyncBusy || _session.connecting) return;
-    setState(() => _bleConnectSyncBusy = true);
+    if (_connectionBusy || _session.connecting) return;
+    setState(() => _connectionBusy = true);
     try {
       bool preferGsmFirst = false;
       final scan = await Navigator.of(context).push<BleScanResult>(
@@ -2086,9 +1822,17 @@ class _CardDetailPageState extends State<CardDetailPage> {
         ),
       );
       if (!mounted) return;
+      if (_card.policy == TransportPolicy.ble) {
+        if (scan != null) await _session.connectBle(scan);
+        return;
+      }
       if (scan != null) {
-        _session.setBleAvailable(true);
         final bleState = await _readBleStateFromBle(scan);
+        if (!mounted) return;
+        _session.setBleAvailable(bleState != null);
+        if (bleState == null) {
+          _snack('Carte détectée, mais lecture BLE impossible. Réessayer.');
+        }
         final blePolicy =
             (bleState == null) ? null : _policyFromBleStateJson(bleState);
         if (!mounted) return;
@@ -2109,10 +1853,12 @@ class _CardDetailPageState extends State<CardDetailPage> {
       if (!mounted) return;
       await _session.connect(
         preferGsmFirst: preferGsmFirst,
-        allowLocalRecovery: true,
+        allowLocalRecovery: _card.policy != TransportPolicy.ble,
       );
+      if (!mounted) return;
+      if (scan != null) await _session.connectBle(scan);
     } finally {
-      if (mounted) setState(() => _bleConnectSyncBusy = false);
+      if (mounted) setState(() => _connectionBusy = false);
     }
   }
 
@@ -2151,7 +1897,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
 
   Widget _buildRelayRows() {
     final rows = <Widget>[];
-    for (int i = 1; i <= 4; i++) {
+    for (int i = 1; i <= _session.totalRelays; i++) {
       final on = _session.relayStates[i] ?? false;
       final mode = _session.relayModes[i] ?? 'AUTO';
       rows.add(
@@ -2196,7 +1942,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
                 children: [
                   Expanded(
                     child: FilledButton.tonal(
-                      onPressed: _session.isConnected
+                      onPressed: _session.canSendCommands
                           ? () => _session.publishRelaySet(i, 'ON')
                           : null,
                       child: const Text('ON'),
@@ -2205,7 +1951,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: FilledButton.tonal(
-                      onPressed: _session.isConnected
+                      onPressed: _session.canSendCommands
                           ? () => _session.publishRelaySet(i, 'OFF')
                           : null,
                       child: const Text('OFF'),
@@ -2214,7 +1960,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: _session.isConnected
+                      onPressed: _session.canSendCommands
                           ? () => _session.publishRelaySet(i, 'AUTO')
                           : null,
                       child: const Text('AUTO'),
@@ -2232,7 +1978,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
 
   Widget _buildInputRows() {
     final rows = <Widget>[];
-    for (int i = 1; i <= 4; i++) {
+    for (int i = 1; i <= _session.totalInputs; i++) {
       final on = _session.inputStates[i] ?? false;
       final vin = _session.vinStates[i] ?? false;
       rows.add(
@@ -2262,7 +2008,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
                 children: [
                   Expanded(
                     child: FilledButton.tonal(
-                      onPressed: _session.isConnected
+                      onPressed: _session.canSendCommands
                           ? () => _session.publishVinSet(i, 'ON')
                           : null,
                       child: const Text('VIN ON'),
@@ -2271,7 +2017,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: FilledButton.tonal(
-                      onPressed: _session.isConnected
+                      onPressed: _session.canSendCommands
                           ? () => _session.publishVinSet(i, 'OFF')
                           : null,
                       child: const Text('VIN OFF'),
@@ -2280,7 +2026,7 @@ class _CardDetailPageState extends State<CardDetailPage> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: _session.isConnected
+                      onPressed: _session.canSendCommands
                           ? () => _session.publishVinSet(i, 'TOGGLE')
                           : null,
                       child: const Text('TOGGLE'),
@@ -2378,49 +2124,34 @@ class _CardDetailPageState extends State<CardDetailPage> {
                             runSpacing: 8,
                             children: [
                               FilledButton.icon(
-                                onPressed: (_session.connecting || _bleConnectSyncBusy)
+                                onPressed: (_session.connecting || _connectionBusy)
                                     ? null
-                                    : _connectWithBleSync,
-                                icon: _bleConnectSyncBusy
+                                    : _toggleConnection,
+                                icon: _connectionBusy
                                     ? const SizedBox(
                                         width: 16,
                                         height: 16,
                                         child: CircularProgressIndicator(strokeWidth: 2),
                                       )
-                                    : const Icon(Icons.play_arrow),
-                                label: Text(_bleConnectSyncBusy ? 'Sync BLE...' : 'Connecter'),
+                                    : Icon(_session.hasConnection
+                                        ? Icons.stop : Icons.play_arrow),
+                                label: Text(_connectionBusy
+                                    ? 'En cours...'
+                                    : _session.hasConnection
+                                        ? 'Déconnecter' : 'Connecter'),
                               ),
                               OutlinedButton.icon(
-                                onPressed: _session.disconnect,
-                                icon: const Icon(Icons.stop),
-                                label: const Text('Déconnecter'),
-                              ),
-                              OutlinedButton.icon(
-                                onPressed: () async {
-                                  final messenger = ScaffoldMessenger.of(context);
-                                  final result = await Navigator.of(context)
-                                      .push<BleScanResult>(
-                                    MaterialPageRoute(
-                                      builder: (_) => BleScannerPage(
-                                        expectedCardId: _card.cardId,
-                                      ),
-                                    ),
-                                  );
-                                  if (!mounted || result == null) return;
-                                  _session.setBleAvailable(true);
-                                  messenger.showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Carte détectée via BLE.'),
-                                    ),
-                                  );
-                                },
-                                icon: const Icon(Icons.bluetooth_searching),
-                                label: const Text('Tester BLE'),
+                                onPressed: _session.canSendCommands
+                                    ? _session.identifyCard : null,
+                                icon: const Icon(Icons.lightbulb_outline),
+                                label: const Text('Identifier la carte'),
                               ),
                             ],
                           ),
                           const SizedBox(height: 10),
                           Text('IP: ${_session.ethIp}    ICCID: ${_session.iccid}'),
+                          if (_session.bleConnected)
+                            Text('Firmware : ${_session.firmwareVersion}'),
                           const SizedBox(height: 6),
                           Text(
                             'Mode détecté via BLE: $_bleDetectedMode',
@@ -2528,13 +2259,29 @@ class CardSession extends ChangeNotifier {
   String ethIp = '--';
   String iccid = '--';
   bool boardOnline = false;
+  String firmwareVersion = '--';
+  int totalRelays = 4;
+  int totalInputs = 4;
 
   final Map<int, bool> relayStates = <int, bool>{};
   final Map<int, String> relayModes = <int, String>{};
   final Map<int, bool> inputStates = <int, bool>{};
   final Map<int, bool> vinStates = <int, bool>{};
 
-  bool get isConnected => localConnected || gsmConnected;
+  BluetoothDevice? _bleDevice;
+  BluetoothCharacteristic? _bleCommand;
+  StreamSubscription<List<int>>? _bleStateSub;
+  StreamSubscription<BluetoothConnectionState>? _bleConnectionSub;
+  final BleStateFramer _bleFramer = BleStateFramer();
+  int _bleGeneration = 0;
+  bool _bleWriting = false;
+  bool _bleConnecting = false;
+
+  bool get bleConnected => _bleDevice?.isConnected == true;
+  bool get hasConnection => localConnected || gsmConnected || bleConnected;
+  bool get isConnected => localConnected || gsmConnected ||
+      (bleConnected && _bleCommand != null);
+  bool get canSendCommands => isConnected && !_bleWriting && !_bleConnecting;
 
   void _notifySafely() {
     if (_disposed) return;
@@ -2548,6 +2295,179 @@ class CardSession extends ChangeNotifier {
       activeTransport = ActiveTransport.ble;
     }
     _notifySafely();
+  }
+
+  void _applyBleState(Map<String, dynamic> state) {
+    if (state['device_id']?.toString().toUpperCase() != card.cardId.toUpperCase()) return;
+    // Keep the UI aligned with the transport currently controlling the card.
+    if (activeTransport != ActiveTransport.ble) return;
+    for (final entry in <String, Map<int, bool>>{
+      'relays': relayStates, 'inputs': inputStates, 'virtual_inputs': vinStates,
+    }.entries) {
+      final values = state[entry.key];
+      if (values is List) {
+        for (var i = 0; i < values.length; i++) {
+          entry.value[i + 1] = values[i] == 1 || values[i] == true;
+        }
+      }
+    }
+    final overrides = state['override'];
+    if (overrides is List) {
+      for (var i = 0; i < overrides.length; i++) {
+        relayModes[i + 1] = overrides[i] == 1 ? 'FORCE_ON'
+            : overrides[i] == 0 ? 'FORCE_OFF' : 'AUTO';
+      }
+    }
+    final eth = state['eth'];
+    if (eth is Map) ethIp = (eth['ip'] ?? '--').toString();
+    firmwareVersion = (state['fw'] ?? '--').toString();
+    totalRelays = EspCard._intOr(state['total_relays'], 4).clamp(1, 16);
+    totalInputs = EspCard._intOr(state['total_inputs'], 4).clamp(1, 16);
+    boardOnline = true;
+    _notifySafely();
+  }
+
+  Future<void> connectBle(BleScanResult result) async {
+    if (_disposed || _bleConnecting) return;
+    _bleConnecting = true;
+    _notifySafely();
+    try {
+      await _disconnectBle();
+      if (_disposed) return;
+      final generation = _bleGeneration;
+      bool current() => !_disposed && generation == _bleGeneration;
+      final device = result.device;
+      _bleDevice = device;
+      try {
+        await FlutterBluePlus.stopScan();
+        if (!current()) return;
+        if (!device.isConnected) {
+          await device.connect(timeout: const Duration(seconds: 10), autoConnect: false);
+        }
+        if (!current()) {
+          await device.disconnect();
+          return;
+        }
+        _bleConnectionSub = device.connectionState.listen((state) {
+          if (!current() || state != BluetoothConnectionState.disconnected) return;
+          bleAvailable = false;
+          _bleCommand = null;
+          boardOnline = localConnected || gsmConnected;
+          if (activeTransport == ActiveTransport.ble) {
+            activeTransport = ActiveTransport.none;
+            statusText = 'Connexion BLE perdue. Reconnecter la carte.';
+          }
+          _notifySafely();
+        });
+        final services = await device.discoverServices();
+        if (!current()) return;
+        BluetoothCharacteristic? notify;
+        BluetoothCharacteristic? read;
+        for (final service in services) {
+          if (service.uuid != bleUuidFor('01', card.cardId)) continue;
+          for (final characteristic in service.characteristics) {
+            if (characteristic.uuid == bleUuidFor('02', card.cardId) &&
+                characteristic.properties.write && characteristic.properties.read) {
+              _bleCommand = characteristic;
+            }
+            if (characteristic.uuid == bleUuidFor('03', card.cardId)) notify = characteristic;
+            if (characteristic.uuid == bleUuidFor('04', card.cardId)) read = characteristic;
+          }
+        }
+        if (notify == null || read == null) throw StateError('Service ESPRelay4 absent');
+        bleAvailable = true;
+        if ((!localConnected && !gsmConnected) || card.policy == TransportPolicy.ble) {
+          activeTransport = ActiveTransport.ble;
+          statusText = _bleCommand == null
+              ? 'BLE en lecture seule : mettre à jour le firmware de la carte.'
+              : 'Connecté via BLE';
+        }
+        _bleStateSub = notify.onValueReceived.listen((bytes) {
+          if (!current()) return;
+          for (final frame in _bleFramer.add(bytes)) {
+            _applyBleState(frame.state);
+          }
+        });
+        await notify.setNotifyValue(true);
+        if (!current()) return;
+        try {
+          final state = parseBleState(utf8.decode(await read.read()));
+          if (!current()) return;
+          if (state != null) _applyBleState(state);
+        } catch (_) {
+          // Notifications supply the state even if the initial read is unavailable.
+        }
+        _notifySafely();
+      } catch (e) {
+        if (current()) {
+          await _disconnectBle();
+          statusText = 'Échec de connexion BLE : $e';
+          _notifySafely();
+        }
+      }
+    } finally {
+      _bleConnecting = false;
+      _notifySafely();
+    }
+  }
+
+  Future<void> _sendBleCommand(String target, int index, String action) async {
+    if (_disposed || _bleWriting) return;
+    final characteristic = _bleCommand;
+    if (!bleConnected || characteristic == null) {
+      statusText = 'Commande BLE indisponible : reconnecter ou mettre à jour le firmware.';
+      _notifySafely();
+      return;
+    }
+    final generation = _bleGeneration;
+    bool current() => !_disposed && generation == _bleGeneration;
+    _bleWriting = true;
+    _notifySafely();
+    try {
+      await characteristic.write(utf8.encode(bleControlCommand(target, index, action)),
+          withoutResponse: false);
+      final deadline = DateTime.now().add(const Duration(seconds: 4));
+      while (current() && DateTime.now().isBefore(deadline)) {
+        final result = utf8.decode(await characteristic.read());
+        if (!current()) return;
+        if (result == 'OK') {
+          statusText = target == 'I'
+              ? 'Identification : la LED clignote rapidement pendant 10 secondes.'
+              : 'Commande BLE acceptée';
+          return;
+        }
+        if (result.startsWith('ERROR:')) throw StateError(result.substring(6));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (current()) throw TimeoutException('Pas de confirmation de la carte');
+    } catch (e) {
+      if (current()) statusText = 'Échec de commande BLE : $e';
+    } finally {
+      if (current()) {
+        _bleWriting = false;
+        _notifySafely();
+      }
+    }
+  }
+
+  Future<void> _disconnectBle() async {
+    _bleGeneration++;
+    final device = _bleDevice;
+    final stateSub = _bleStateSub;
+    final connectionSub = _bleConnectionSub;
+    _bleDevice = null;
+    _bleCommand = null;
+    _bleStateSub = null;
+    _bleConnectionSub = null;
+    _bleFramer.clear();
+    _bleWriting = false;
+    bleAvailable = false;
+    if (activeTransport == ActiveTransport.ble) activeTransport = ActiveTransport.none;
+    await stateSub?.cancel();
+    await connectionSub?.cancel();
+    try {
+      await device?.disconnect();
+    } catch (_) {}
   }
 
   bool _isClientConnected(MqttServerClient? client) {
@@ -2809,10 +2729,7 @@ class CardSession extends ChangeNotifier {
     };
     client.connectionMessage = MqttConnectMessage()
         .withClientIdentifier(client.clientIdentifier)
-        .startClean()
-        .withWillQos(MqttQos.atMostOnce)
-        .withWillTopic('${card.baseTopic}/status')
-        .withWillMessage('offline');
+        .startClean();
   }
 
   void _subscribe(MqttServerClient client) {
@@ -2971,8 +2888,38 @@ class CardSession extends ChangeNotifier {
     }
   }
 
+  Future<void> identifyCard() async {
+    if (_disposed || !canSendCommands) return;
+    _refreshConnectedFlags();
+    if (activeTransport == ActiveTransport.ble ||
+        (!localConnected && !gsmConnected && bleConnected)) {
+      await _sendBleCommand('I', 0, '');
+      return;
+    }
+    final client = _activeClient;
+    if (client == null || !_isClientConnected(client)) {
+      statusText = 'Reconnecter la carte pour l’identifier.';
+      _notifySafely();
+      return;
+    }
+    try {
+      final payload = MqttClientPayloadBuilder()..addString('ON');
+      client.publishMessage('${card.baseTopic}/identify/set',
+          MqttQos.atLeastOnce, payload.payload!, retain: false);
+      statusText = 'Identification envoyée : clignotement rapide pendant 10 secondes.';
+    } catch (e) {
+      statusText = 'Échec de l’identification : $e';
+    }
+    _notifySafely();
+  }
+
   Future<void> publishRelaySet(int relay, String action) async {
     if (_disposed) return;
+    if (activeTransport == ActiveTransport.ble ||
+        (!localConnected && !gsmConnected && bleConnected)) {
+      await _sendBleCommand('R', relay, action);
+      return;
+    }
     _refreshConnectedFlags();
     MqttServerClient? client = _activeClient;
     if (client == null || !_isClientConnected(client)) {
@@ -2995,12 +2942,17 @@ class CardSession extends ChangeNotifier {
       '${card.baseTopic}/relay/$relay/set',
       MqttQos.atLeastOnce,
       payload.payload!,
-      retain: card.retain,
+      retain: false,
     );
   }
 
   Future<void> publishVinSet(int vin, String action) async {
     if (_disposed) return;
+    if (activeTransport == ActiveTransport.ble ||
+        (!localConnected && !gsmConnected && bleConnected)) {
+      await _sendBleCommand('V', vin, action);
+      return;
+    }
     _refreshConnectedFlags();
     MqttServerClient? client = _activeClient;
     if (client == null || !_isClientConnected(client)) {
@@ -3023,7 +2975,7 @@ class CardSession extends ChangeNotifier {
       '${card.baseTopic}/vin/$vin/set',
       MqttQos.atLeastOnce,
       payload.payload!,
-      retain: card.retain,
+      retain: false,
     );
   }
 
@@ -3034,6 +2986,8 @@ class CardSession extends ChangeNotifier {
     _retryTimer = null;
     await _disconnectLocal();
     await _disconnectGsm();
+    await _disconnectBle();
+    boardOnline = false;
     _allowLocalRecovery = false;
     _manualDisconnectInProgress = false;
 
@@ -3069,6 +3023,7 @@ class CardSession extends ChangeNotifier {
     _manualDisconnectInProgress = true;
     _retryTimer?.cancel();
     _retryTimer = null;
+    unawaited(_disconnectBle());
     unawaited(_subLocal?.cancel());
     _subLocal = null;
     unawaited(_subGsm?.cancel());
@@ -3136,71 +3091,90 @@ class _BleScannerPageState extends State<BleScannerPage> {
 
   Future<bool> _ensurePermissions() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return true;
-    final scan = await Permission.bluetoothScan.request();
-    final connect = await Permission.bluetoothConnect.request();
-    final loc = await Permission.locationWhenInUse.request();
-    return scan.isGranted && connect.isGranted && loc.isGranted;
+    final sdk = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
+    if (sdk >= 31) {
+      final scan = await Permission.bluetoothScan.request();
+      final connect = await Permission.bluetoothConnect.request();
+      return scan.isGranted && connect.isGranted;
+    }
+    return (await Permission.locationWhenInUse.request()).isGranted;
   }
 
   Future<void> _startScan() async {
-    final ok = await _ensurePermissions();
-    if (!ok) {
-      setState(() => _status = 'Permissions BLE requises');
-      return;
-    }
-    _found.clear();
-    setState(() {
-      _scanning = true;
-      _status = 'Scanning BLE...';
-    });
-
-    _scanSub?.cancel();
-    _scanSub = FlutterBluePlus.scanResults.listen((results) {
-      for (final r in results) {
-        final name = _deviceName(r);
-        final serviceUuid = _extractEspServiceUuidFromScan(r);
-        if (serviceUuid != null) {
-          final cardId = _extractCardIdFromServiceUuid(serviceUuid);
-          if (cardId != null && EspCard.isValidCardId(cardId)) {
-            _found[cardId] = BleScanResult(
-              cardId: cardId,
-              suggestedName: name.isEmpty ? 'ESPRelay4-$cardId' : name,
-              device: r.device,
-              serviceUuid: serviceUuid,
-            );
-            continue;
-          }
-        }
-
-        // Some Android scans do not expose service UUIDs in advertisement.
-        // Fallback: for ESPRelay-looking names, resolve card ID from services.
-        if (_looksLikeEspRelayName(name)) {
-          unawaited(_resolveCardIdFromServices(r.device, suggestedName: name));
-        }
-      }
-      final expected = widget.expectedCardId;
-      if (!_autoReturned &&
-          expected != null &&
-          expected.isNotEmpty &&
-          _found.containsKey(expected)) {
-        _autoReturned = true;
-        FlutterBluePlus.stopScan();
-        if (mounted) Navigator.of(context).pop(_found[expected]);
+    if (_scanning || _autoReturned) return;
+    setState(() => _scanning = true);
+    try {
+      final ok = await _ensurePermissions();
+      if (!mounted) return;
+      if (!ok) {
+        _scanning = false;
+        setState(() => _status = 'Permissions BLE requises');
         return;
       }
-      if (mounted) setState(() {});
-    });
-
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
-    _scanTimer?.cancel();
-    _scanTimer = Timer(const Duration(seconds: 6), () async {
-      await FlutterBluePlus.stopScan();
-      if (!mounted) return;
+      _found.clear();
       setState(() {
-        _scanning = false;
-        _status = _found.isEmpty ? 'Aucune carte BLE trouvée' : 'Scan terminé';
+        _scanning = true;
+        _status = 'Scanning BLE...';
       });
-    });
+
+      _scanSub?.cancel();
+      _scanSub = FlutterBluePlus.scanResults.listen((results) {
+        if (!mounted || _autoReturned) return;
+        for (final r in results) {
+          if (_resolving.contains(r.device.remoteId.toString())) continue;
+          final name = _deviceName(r);
+          final serviceUuid = _extractEspServiceUuidFromScan(r);
+          if (serviceUuid != null) {
+            final cardId = _extractCardIdFromServiceUuid(serviceUuid);
+            if (cardId != null && EspCard.isValidCardId(cardId)) {
+              _found[cardId] = BleScanResult(
+                cardId: cardId,
+                suggestedName: name.isEmpty ? 'ESPRelay4-$cardId' : name,
+                device: r.device,
+                serviceUuid: serviceUuid,
+              );
+              continue;
+            }
+          }
+
+          // Some Android scans do not expose service UUIDs in advertisement.
+          // Fallback: for ESPRelay-looking names, resolve card ID from services.
+          if (_looksLikeEspRelayName(name)) {
+            unawaited(_resolveCardIdFromServices(r.device, suggestedName: name));
+          }
+        }
+        final expected = widget.expectedCardId;
+        if (!_autoReturned &&
+            expected != null &&
+            expected.isNotEmpty &&
+            _found.containsKey(expected)) {
+          _autoReturned = true;
+          FlutterBluePlus.stopScan();
+          if (mounted) Navigator.of(context).pop(_found[expected]);
+          return;
+        }
+        if (mounted) setState(() {});
+      });
+
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
+      if (!mounted || _autoReturned) return;
+      _scanTimer?.cancel();
+      _scanTimer = Timer(const Duration(seconds: 6), () async {
+        await FlutterBluePlus.stopScan();
+        if (!mounted) return;
+        setState(() {
+          _scanning = false;
+          _status = _found.isEmpty ? 'Aucune carte BLE trouvée' : 'Scan terminé';
+        });
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _scanning = false;
+          _status = 'Échec du scan BLE : $e';
+        });
+      }
+    }
   }
 
   String _deviceName(ScanResult r) {
@@ -3234,18 +3208,17 @@ class _BleScannerPageState extends State<BleScannerPage> {
     required String suggestedName,
   }) async {
     final deviceKey = device.remoteId.toString();
-    if (_resolving.contains(deviceKey)) return;
+    if (!mounted || _autoReturned || _resolving.isNotEmpty) return;
     _resolving.add(deviceKey);
     bool connectedHere = false;
     try {
-      try {
+      if (!device.isConnected) {
+        await FlutterBluePlus.stopScan();
         await device.connect(
           timeout: const Duration(seconds: 5),
           autoConnect: false,
         );
         connectedHere = true;
-      } catch (_) {
-        // already connected or temporary race
       }
 
       final services = await device.discoverServices();
@@ -3261,6 +3234,13 @@ class _BleScannerPageState extends State<BleScannerPage> {
       final cardId = _extractCardIdFromServiceUuid(matched);
       if (cardId == null || !EspCard.isValidCardId(cardId)) return;
 
+      // Finish the temporary discovery connection before handing the device
+      // to the next page, which starts its own connection immediately.
+      if (connectedHere) {
+        await device.disconnect();
+        connectedHere = false;
+      }
+      if (!mounted || _autoReturned) return;
       _found[cardId] = BleScanResult(
         cardId: cardId,
         suggestedName:
@@ -3281,8 +3261,10 @@ class _BleScannerPageState extends State<BleScannerPage> {
       }
 
       if (mounted) setState(() {});
-    } catch (_) {
-      // ignore fallback errors
+    } catch (e) {
+      if (mounted && !_autoReturned) {
+        setState(() => _status = 'Impossible de lire la carte BLE : $e');
+      }
     } finally {
       if (connectedHere) {
         try {
@@ -3290,6 +3272,16 @@ class _BleScannerPageState extends State<BleScannerPage> {
         } catch (_) {}
       }
       _resolving.remove(deviceKey);
+      // Resume discovery if the page still needs other devices.
+      if (mounted && !_autoReturned && _scanning) {
+        try {
+          await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
+        } catch (e) {
+          if (mounted) {
+            setState(() => _status = 'Échec du scan BLE : $e');
+          }
+        }
+      }
     }
   }
 

@@ -523,10 +523,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
 
     final connMessage = MqttConnectMessage()
         .withClientIdentifier(_settings.clientId)
-        .startClean()
-        .withWillQos(MqttQos.atMostOnce)
-        .withWillTopic('${_topicRoot()}/status')
-        .withWillMessage('offline');
+        .startClean();
     client.connectionMessage = connMessage;
 
     try {
@@ -1287,7 +1284,7 @@ class _RelayDashboardPageState extends State<RelayDashboardPage>
               const Text('Target board',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
               const SizedBox(height: 10),
-              _field('Card ID (MAC without :)', _cardIdCtrl),
+              _field('Card ID', _cardIdCtrl),
               Align(
                 alignment: Alignment.centerLeft,
                 child: OutlinedButton.icon(

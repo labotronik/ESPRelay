@@ -1,416 +1,810 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>ESPRelay</title>
+ <head>
+  <meta charset="utf-8"/>
+  <meta content="width=device-width,initial-scale=1" name="viewport"/>
+  <title>
+   ESPRelay
+  </title>
   <style>
-    :root { --b:#ddd; --bg:#f7f7f7; --cell-w:220px; }
+   :root{color-scheme:light;--bg:#f3f5f9;--surface:#fff;--soft:#f7f9fc;--text:#203047;--muted:#66758a;--b:#dce3ec;--accent:#245bce;--accent-soft:#edf3ff;--success:#18764b;--danger:#b63344;--shadow:0 2px 8px #182b4810}
     *{box-sizing:border-box}
-    body{font-family:system-ui,Arial;margin:16px;max-width:1200px;background:var(--bg)}
-    body.dark{--b:#3c3c3c;--bg:#1f1f1f;background:#121212;color:#eee}
-    h1{margin:0 0 8px 0}
-    .tabs{display:flex;gap:8px;margin:12px 0}
-    .tab{padding:8px 10px;border:1px solid var(--b);border-radius:10px;background:#fff;cursor:pointer}
-    .tab.active{background:var(--bg);font-weight:700}
-    .tab.disabled{opacity:.5;pointer-events:none}
-    .tabs.sub{margin:8px 0}
-    .tab.sub{padding:6px 8px;font-size:.9em}
-    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch}
-    .modules{display:grid;gap:12px;grid-template-columns:1fr;justify-items:start}
-    .module-card{border:1px solid var(--b);border-radius:12px;padding:8px;background:#fff;width:min(100%, calc(var(--cell-w)*2 + 48px))}
-    .modules-wrap{width:min(100%, calc(var(--cell-w)*2 + 96px))}
-    .card{border:1px solid var(--b);border-radius:14px;padding:12px;min-width:260px;background:#fff}
-    .grid4{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:12px}
-    @media(min-width:1100px){ .grid4{grid-template-columns:repeat(4,minmax(260px,1fr));} }
-    .grid2{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:12px}
-    .on{font-weight:800}
-    .pill{display:inline-block;padding:2px 8px;border:1px solid var(--b);border-radius:999px;font-size:.85em;background:var(--bg)}
-    .pill.shutter{background:#eee;color:#555;border-color:#ccc}
-    .hb-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#27c046;margin-right:6px;animation:hb 1s steps(1,end) infinite}
-    .hb-dot.offline{background:#e53935;animation:none;opacity:1}
-    @keyframes hb{50%{opacity:.2}}
-    button{padding:8px 10px;border-radius:10px;border:1px solid #aaa;background:#fff;cursor:pointer}
-    button.primary{background:var(--bg);font-weight:700}
-    button.small{padding:6px 8px;font-size:.9em}
-    select,input[type="number"],input[type="text"]{padding:6px 8px;border-radius:10px;border:1px solid var(--b)}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    body.dark{color-scheme:dark;--bg:#111925;--surface:#1b2636;--soft:#202d3f;--text:#e5edf7;--muted:#a1b0c6;--b:#34445b;--accent:#92b7ff;--accent-soft:#263957;--success:#7ad9ac;--danger:#ffa4ad;--shadow:none}
+    button,input,select{font:inherit}
+    button,select,input:not([type="checkbox"]){min-height:40px;border:1px solid var(--b);border-radius:8px;background:var(--surface);color:var(--text)}
+    button{padding:8px 14px;cursor:pointer;font-weight:600;transition:background .15s,border-color .15s}
+    button:hover:not(:disabled){background:var(--soft);border-color:var(--muted)}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+    body.dark button.primary{color:#10203b}
+    button.primary:hover:not(:disabled){filter:brightness(.94);background:var(--accent);border-color:var(--accent)}
+    button.small{min-height:34px;padding:5px 10px;font-size:12px}
+    button:disabled{opacity:.5;cursor:default}
+    button.danger{color:var(--danger)}
+    input:not([type="checkbox"]),select{padding:8px 10px;width:100%;min-width:0;max-width:100%}
+    input[type="checkbox"]{accent-color:var(--accent);width:16px;height:16px;margin:0;vertical-align:middle;flex-shrink:0}
+    input:disabled,select:disabled{background:var(--soft);color:var(--muted)}
+    :focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+    h1,h2,h3,p{margin:0}
+    h1{font-size:20px;letter-spacing:-.4px;line-height:1.2}
+    h2{font-size:23px;letter-spacing:-.5px;line-height:1.3}
+    h3{font-size:16px;line-height:1.4;margin-bottom:10px}
+    b{font-weight:650}
     label{user-select:none}
-    .muted{color:#666}
-    .sep{height:1px;background:var(--b);margin:10px 0}
-    .ok{color:#0a7a2f;font-weight:700}
-    .err{color:#b00020;font-weight:700}
-    pre{background:#fafafa;border:1px solid var(--b);padding:10px;border-radius:12px;overflow:auto}
-    .hide{display:none}
-    .inline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .lang{margin-left:auto;display:flex;gap:2px}
-    .flag{border:1px solid var(--b);border-radius:999px;padding:4px 8px;background:#fff;cursor:pointer;font-size:1.1em}
-    .flag.active{background:var(--bg);font-weight:700}
-    .chip{border:1px solid var(--b);border-radius:999px;padding:6px 10px;background:var(--bg)}
-    .notice{padding:8px 10px;border:1px dashed var(--b);border-radius:10px;background:#fff}
-    body.dark .card,
-    body.dark .module-card,
-    body.dark .tab,
-    body.dark .pill,
-    body.dark .chip,
-    body.dark pre,
-    body.dark .notice{background:#1a1a1a;color:#eee;border-color:var(--b)}
-    body.dark .tab.active{background:#262626}
-    body.dark input,
-    body.dark select,
-    body.dark button{background:#1a1a1a;color:#eee;border-color:var(--b)}
-    body.dark .muted{color:#aaa}
-    body.dark .shutter-relay{background:#1d1d1d;color:#bbb;border-color:#333}
-    body.dark .pill.shutter{background:#2a2a2a;color:#bbb;border-color:#555}
-    .two{display:grid;grid-template-columns:minmax(160px,var(--cell-w)) minmax(160px,var(--cell-w));gap:6px;justify-content:start}
-    .hr{height:1px;background:var(--b);margin:8px 0}
-    .shutter-relay{background:#f2f2f2;color:#777;border-color:#ddd}
-    .led{display:inline-block;width:16px;height:16px;border-radius:999px;border:1px solid #bbb;background:#e6e6e6;vertical-align:middle;margin-right:6px}
-    .led.on{background:#27c046;border-color:#1aa13a}
-    .switch{position:relative;display:inline-block;width:44px;height:24px;vertical-align:middle;margin:0 6px}
+    .app-header{background:var(--surface);border-bottom:1px solid var(--b)}
+    .header-inner,.main-shell,.footer-inner{width:min(1240px,100%);margin:auto;padding:24px 28px}
+    .header-main{display:flex;justify-content:space-between;align-items:center;gap:20px}
+    .brand{display:flex;align-items:center;gap:12px}
+    .brand-mark{display:grid;place-items:center;width:64px;height:44px;border-radius:12px;background:var(--accent);color:var(--surface);font-size:21px;font-weight:750;letter-spacing:-.8px;flex-shrink:0}
+    .brand-caption{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+    .header-actions,.lang{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .flag{min-height:34px;padding:5px 9px;font-size:13px}
+    .flag.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+    .status-bar{position:relative;display:flex;align-items:center;gap:16px;margin-top:18px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+    .status-bar .pill{background:transparent;border:0;padding:0;border-radius:0;font-size:12px}
+    .device-details{position:relative}
+    .device-details summary{cursor:pointer;color:var(--muted)}
+    .device-details .detail-popover{position:absolute;z-index:5;top:26px;right:0;display:grid;gap:8px;padding:16px;border:1px solid var(--b);border-radius:10px;background:var(--surface);box-shadow:var(--shadow);width:max-content;max-width:300px}
+    .status-bar #fw{overflow-wrap:anywhere}
+    .connection-info{display:inline-flex;align-items:center;gap:7px}.connection-info .hb-dot{margin-right:0}
+    .hb-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--success);margin-right:7px}
+    .hb-dot.offline{background:var(--danger)}
+    .tabs{display:flex;gap:6px;margin:0 0 28px;padding:5px;background:var(--surface);border:1px solid var(--b);border-radius:12px;width:fit-content;max-width:100%;flex-wrap:wrap}
+    .tab{background:transparent;border-color:transparent;min-height:42px;padding:9px 20px;color:var(--muted)}
+    .tab.active{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+    .tab.disabled{opacity:.5;cursor:default}
+    .page-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+    .page-heading p{color:var(--muted);margin-top:6px;font-size:13px;max-width:720px}
+    .section-nav{display:flex;gap:4px;border-bottom:1px solid var(--b);margin-bottom:22px;flex-wrap:wrap}
+    .section-nav button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);padding:10px 16px}
+    .section-nav button.active{border-bottom-color:var(--accent);color:var(--accent)}
+    .card,.module-card{min-width:0;background:var(--surface);border:1px solid var(--b);border-radius:12px;padding:22px;box-shadow:var(--shadow)}
+    .row,.inline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .modules,.grid2,.grid4,.setup-grid,.dashboard-secondary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}
+    .modules{align-items:stretch}
+    .modules-wrap{width:100%}
+    .dashboard-layout{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:20px;align-items:start}
+    .dashboard-layout .modules{grid-template-columns:1fr}
+    .dashboard-secondary{grid-template-columns:1fr}
+    .dashboard-layout:has(.module-card:nth-child(2)){grid-template-columns:1fr}
+    .dashboard-layout:has(.module-card:nth-child(2)) .modules,.dashboard-layout:has(.module-card:nth-child(2)) .dashboard-secondary{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .dashboard-secondary .row{display:block;min-width:0}
+    .section-head,.module-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .module-heading h3,.section-head h3{margin:0}
+    .module-heading{margin-bottom:16px}
+    .module-badges{display:flex;gap:5px;flex-wrap:wrap}
+    .module-card{padding:20px}
+    .channel-header,.channel-row{display:grid;grid-template-columns:174px 84px 50px;gap:16px;align-items:center;justify-content:start}
+    .channel-header{font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);padding-bottom:10px;border-bottom:1px solid var(--b)}
+    .channel-row{min-height:60px;border-bottom:1px solid var(--b)}
+    .channel-row:last-child{border-bottom:0}
+    .relay-control{display:grid;grid-template-columns:30px 44px minmax(0,1fr);align-items:center;gap:8px;min-width:0}
+    .relay-meta{display:grid;gap:2px;font-size:12px}
+    .relay-mode{font-size:10px;color:var(--muted);line-height:1.3}
+    .channel-row .auto-button{padding:5px 6px;min-height:30px;font-size:10px}
+    .input-state{display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap}
+    .input-state .muted{font-size:10px}
+    .led{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--b);flex-shrink:0}
+    .led.on{background:var(--success)}
+    .on,.ok{color:var(--success);font-weight:650}
+    .err{color:var(--danger);font-weight:650}
+    .muted{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+    .pill{display:inline-flex;align-items:center;padding:3px 8px;border:1px solid var(--b);border-radius:6px;font-size:11px;background:var(--soft);max-width:100%;overflow-wrap:anywhere}
+    .pill.shutter{color:var(--muted);font-size:10px}
+    .pill.err{border-color:var(--danger)}
+    .switch{position:relative;display:inline-block;width:40px;height:24px;flex-shrink:0}
     .switch input{opacity:0;width:0;height:0}
-    .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:999px;transition:.2s}
-    .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;top:3px;background:white;border-radius:50%;transition:.2s}
-    .switch input:checked + .slider{background:#27c046}
-    .switch input:checked + .slider:before{transform:translateX(20px)}
-    .relay-row{display:flex;align-items:center;gap:10px}
-    .relay-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    .subcard{border:1px solid var(--b);border-radius:8px;padding:3px;background:#fff}
-    .subcard .relay-row{gap:6px}
-    .subcard .relay-left{gap:6px}
-    .subcard .switch{width:36px;height:20px}
-    .subcard .slider:before{height:14px;width:14px;left:3px;top:3px}
-    .subcard .switch input:checked + .slider:before{transform:translateX(16px)}
-    #tab-setup .inline{justify-content:flex-start;align-items:flex-start}
-    #tab-setup .card{text-align:left}
-    .form-grid{display:grid;grid-template-columns:140px 1fr;gap:8px 10px;align-items:center}
-    .form-grid .muted{justify-self:start}
-    .form-grid input,
-    .form-grid select{width:100%;max-width:100%}
-    .ota-drop-zone{border:1px dashed var(--b);border-radius:12px;padding:10px;background:#fff}
-    .ota-drop-zone.drag-over{border-color:#0f5cc0;background:#eef5ff}
-    .ota-drop-hint{margin-top:6px}
-    @media(max-width:520px){
-      .form-grid{grid-template-columns:1fr}
-      .form-grid .muted{justify-self:start}
+    .slider{position:absolute;cursor:pointer;inset:0;background:var(--b);border-radius:999px;transition:background .15s}
+    .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 3px #0002;transition:transform .15s}
+    .switch input:checked+.slider{background:var(--success)}
+    .switch input:checked+.slider:before{transform:translateX(16px)}
+    .switch input:focus-visible+.slider{outline:3px solid var(--accent);outline-offset:3px}
+    .switch input:disabled+.slider{opacity:.5;cursor:default}
+    .sep,.hr{height:1px;background:var(--b);margin:18px 0}
+    .hide{display:none!important}
+    .field{display:flex;flex-direction:column;gap:7px;min-width:0;margin-bottom:16px}
+    .field>span,.field>label{color:var(--muted);font-size:12px;font-weight:550}
+    .field:last-child{margin-bottom:0}
+    .form-grid{display:grid;grid-template-columns:170px minmax(0,1fr);gap:14px 18px;align-items:center}
+    .form-grid .muted{font-size:12px}
+    .form-grid .pill{justify-self:start}
+    .field-pair,.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+    .input-unit{display:flex;align-items:center;gap:8px;min-width:0}
+    .input-unit span{font-size:12px;color:var(--muted);white-space:nowrap}
+    .check-label{display:inline-flex;align-items:center;gap:8px;font-size:13px}
+    .choice-list{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 16px}
+    .choice-list label{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid var(--b);border-radius:6px;font-size:12px}
+    .choice-list label:has(input:checked){background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+    .rule-card,.shutter-card{height:100%;display:flex;flex-direction:column}
+    .card-footer{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:auto;padding-top:18px}
+    .card-footer .muted{font-size:12px}
+    .advanced{margin-top:16px;border-top:1px solid var(--b);padding-top:12px}
+    .advanced summary{cursor:pointer;font-size:12px;color:var(--muted);padding:4px 0}
+    .advanced[open] summary{margin-bottom:12px}
+    .rule-card .pulse-field{margin-top:16px;margin-bottom:0}
+    #rulesGrid{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:stretch}
+    #rulesGrid .rule-card{padding:14px}
+    #rulesGrid .module-heading{margin-bottom:10px;gap:8px}
+    #rulesGrid h3{font-size:14px}
+    #rulesGrid .field{gap:4px;margin-bottom:10px}
+    #rulesGrid input:not([type="checkbox"]),#rulesGrid select{min-height:34px;padding:6px 8px;font-size:12px}
+    #rulesGrid input[type="checkbox"]{width:14px;height:14px}
+    #rulesGrid .choice-list{gap:4px;margin:6px 0 10px}
+    #rulesGrid .choice-list label{gap:4px;padding:4px 6px}
+    #rulesGrid .check-label{gap:6px;font-size:12px}
+    #rulesGrid .pulse-field{margin-top:10px}
+    #rulesGrid .pulse-field .field{display:grid;grid-template-columns:minmax(0,1fr) 96px;align-items:center;margin:0;gap:6px}
+    #rulesGrid .advanced{margin-top:10px;padding-top:8px}
+    #rulesGrid .advanced[open] summary{margin-bottom:8px}
+    #rulesGrid .field-pair{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    #rulesGrid .card-footer{padding-top:12px;gap:6px}
+    #rulesGrid .card-footer button{min-height:32px;padding:5px 8px}
+    @media(max-width:1100px){#rulesGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:600px){#rulesGrid{grid-template-columns:1fr}}
+    .subcard{border:1px solid var(--b);border-radius:10px;padding:18px;background:var(--soft);min-width:0}
+    .virtual-grid{align-items:stretch;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:20px}
+    .help-copy{max-width:840px;line-height:1.7}
+    .setup-panel{max-width:100%}
+    .setup-grid>.card{height:100%}.setup-grid>.ota-card{grid-column:1/-1}
+    .mqtt-layout{max-width:900px}
+    .mqtt-options{display:flex;gap:12px 24px;flex-wrap:wrap;margin-bottom:18px}
+    .mqtt-save{margin-top:20px}
+    .notice{padding:12px 14px;background:var(--soft);border:1px solid var(--b);border-radius:8px;color:var(--muted);font-size:12px}
+    .shutter-dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:18px}
+    .shutter-tile{border:1px solid var(--b);border-radius:8px;padding:14px}
+    .shutter-tile .inline{margin-top:14px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+    .shutter-tile button{font-size:12px;padding:8px 6px}
+    .sensor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:18px}
+    .sensor-tile{background:var(--soft);border-radius:8px;padding:14px}
+    .sensor-tile b{font-size:24px;display:block;line-height:1.4;margin-top:6px}
+    .sensor-tile small{display:block;color:var(--muted);margin-top:4px;font-size:12px}
+    .sensor-tile .muted{font-size:11px}
+    .ota-drop-zone{border:1px dashed var(--b);border-radius:10px;padding:18px;background:var(--soft)}
+    .ota-drop-zone.drag-over{background:var(--accent-soft);border-color:var(--accent)}
+    .ota-drop-hint{margin-top:8px;font-size:12px}
+    .ota-drop-zone .inline{align-items:stretch}
+    .ota-drop-zone input{flex:1 1 180px;width:0;font-size:12px}
+    progress{accent-color:var(--accent);max-width:100%}
+    pre{background:var(--soft);border:1px solid var(--b);padding:16px;border-radius:8px;overflow:auto;font-size:12px;max-height:440px;margin:14px 0 0}
+    #backup-panel{max-width:860px}
+    #auth_form{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr)) auto;align-items:end;gap:16px;margin-top:18px}
+    #auth_form[style*="none"]{display:none!important}
+    #auth_form .field{margin:0}
+    #login_card{margin-bottom:20px;max-width:860px}
+    #msg{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:20;border-radius:10px;background:var(--surface);box-shadow:0 4px 24px #0002;padding:12px 20px;border:1px solid var(--b);width:max-content;max-width:calc(100% - 32px);font-size:13px}
+    #msg:empty,#msg:not(.ok):not(.err){display:none}
+    .footer-inner{font-size:11px;color:var(--muted);padding-top:12px;padding-bottom:24px}
+    @media(max-width:1000px){.dashboard-layout{grid-template-columns:1fr}.dashboard-layout:has(.module-card:nth-child(2)) .modules{grid-template-columns:1fr}.dashboard-secondary{grid-template-columns:repeat(2,minmax(0,1fr))}.grid4{grid-template-columns:repeat(2,minmax(0,1fr))}.setup-grid{grid-template-columns:1fr}.setup-grid>.card{max-width:860px}.modules{grid-template-columns:1fr}.module-card{max-width:100%}}
+    @media(max-width:650px){
+      .header-inner,.main-shell,.footer-inner{padding:18px 16px}
+      h1{font-size:18px}h2{font-size:21px}.brand-mark{width:54px;height:36px;font-size:18px}
+      .header-main{align-items:flex-start;gap:12px;flex-wrap:wrap}.header-actions{margin-left:auto}.brand-caption{font-size:9px}
+      .status-bar{gap:10px}.device-details{position:static}.device-details .detail-popover{left:0;right:0;top:calc(100% + 8px);width:auto;max-width:100%}
+      .tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;margin-bottom:24px;gap:4px}.tab{padding:8px 10px;font-size:13px}
+      .grid4,.grid2,.dashboard-secondary,.dashboard-layout:has(.module-card:nth-child(2)) .dashboard-secondary,.field-pair,.two{grid-template-columns:1fr;gap:16px}.virtual-grid{align-items:stretch;grid-template-columns:1fr}
+      .card{padding:18px}.module-card{padding:16px}.channel-header,.channel-row{grid-template-columns:minmax(0,1fr) 70px 42px;gap:8px}
+      .relay-control{grid-template-columns:23px 40px minmax(0,1fr);gap:6px}.channel-row .auto-button{font-size:9px;padding:5px 3px}
+      .input-state{font-size:11px;gap:4px}.input-state .muted{font-size:9px}
+      .form-grid{grid-template-columns:1fr;gap:7px}.form-grid input,.form-grid select,.form-grid .pill{margin-bottom:9px}
+      .section-nav{gap:0}.section-nav button{padding:9px 11px;font-size:12px}.page-heading{gap:12px}
+      #auth_form{grid-template-columns:1fr!important}.setup-grid{gap:16px}
     }
-    @media(max-width:820px){
-      body{margin:10px}
-      .tabs{flex-wrap:wrap}
-      .tab{padding:6px 8px;font-size:.9em}
-      .lang{margin-left:0;width:100%;justify-content:flex-end}
-      .modules-wrap{width:100%}
-      .module-card{width:100%}
-      .two{grid-template-columns:1fr}
-    }
-    @media(max-width:520px){
-      body{margin:8px}
-      .tab{font-size:.85em}
-    }
-    body.dark .subcard{background:#1a1a1a;border-color:var(--b)}
-    body.dark .ota-drop-zone{background:#1a1a1a;border-color:var(--b)}
-    body.dark .ota-drop-zone.drag-over{background:#263247;border-color:#7ea6df}
+    @media(prefers-reduced-motion:reduce){*{transition:none!important}}
   </style>
-</head>
-<body>
-  <h1 data-i18n="page.header">ESPRelay4 - LBTK</h1>
-  <div class="inline">
-    <span id="net" class="pill">ETH: ?</span>
-    <span id="fw" class="pill">FW: --</span>
-    <span id="hb" class="pill"><span class="hb-dot"></span><span id="uptime">Uptime: --</span></span>
-    <span id="msg"></span>
-    <button class="small" id="auth_logout_top" onclick="logout()" data-i18n="setup.logout" style="display:none;">Logout</button>
-    <span class="lang">
-      <button class="flag" id="flag-en" onclick="setLang('en')" title="English">🇬🇧</button>
-      <button class="flag" id="flag-fr" onclick="setLang('fr')" title="Français">🇫🇷</button>
-      <button class="flag" id="theme_toggle" onclick="toggleTheme()" title="Dark mode">Dark</button>
-    </span>
-  </div>
-
-  <div class="tabs">
-    <div class="tab active" data-tab="dash" data-i18n="tabs.dashboard">Dashboard</div>
-    <div class="tab" data-tab="prog" data-i18n="tabs.programming">Programming</div>
-    <div class="tab" data-tab="setup" data-i18n="tabs.setup">Setup</div>
-    <div class="tab" data-tab="backup" data-i18n="tabs.backup">Backup</div>
-  </div>
-
-  <!-- DASHBOARD -->
-  <div id="tab-dash">
-    <div class="row">
-      <div class="card" id="login_card" style="flex:1;min-width:320px">
-        <h3 data-i18n="dashboard.login_title">Login</h3>
-        <div class="muted" data-i18n="dashboard.login_desc">Login required to modify settings.</div>
-        <div class="sep"></div>
-        <div class="inline">
-          <span id="auth_status" class="pill">Not logged</span>
-          <button class="small" id="auth_logout" onclick="logout()" data-i18n="setup.logout" style="display:none;">Logout</button>
+ </head>
+ <body>
+  <header class="app-header">
+   <div class="header-inner">
+    <div class="header-main">
+     <div class="brand">
+      <span aria-label="ER4" class="brand-mark" role="img">
+       ER4
+      </span>
+      <div>
+       <div class="brand-caption">
+        Labotronik
+       </div>
+       <h1 data-i18n="page.header">
+        ESPRelay4
+       </h1>
+      </div>
+     </div>
+     <div class="header-actions">
+      <button class="small" data-i18n="setup.logout" id="auth_logout_top" onclick="logout()" style="display:none;">
+       Logout
+      </button>
+      <span class="lang">
+       <button class="flag" id="flag-en" onclick="setLang('en')" title="English">
+        EN
+       </button>
+       <button class="flag" id="flag-fr" onclick="setLang('fr')" title="Français">
+        FR
+       </button>
+       <button class="flag" id="theme_toggle" onclick="toggleTheme()" title="Dark mode">
+        Dark
+       </button>
+      </span>
+     </div>
+    </div>
+    <div class="status-bar">
+     <span class="connection-info">
+      <span aria-label="Board offline" class="hb-dot offline" role="img" title="Board offline">
+      </span>
+      <span class="pill" id="net">
+       ETH: ?
+      </span>
+     </span>
+     <details class="device-details">
+      <summary data-i18n="layout.device_details">
+       Device details
+      </summary>
+      <div class="detail-popover">
+       <span class="pill" id="fw">
+        FW: --
+       </span>
+       <span class="pill" id="hb">
+        <span id="uptime">
+         Uptime: --
+        </span>
+       </span>
+      </div>
+     </details>
+    </div>
+   </div>
+  </header>
+  <main class="main-shell">
+   <nav aria-label="Main" class="tabs">
+    <button aria-current="page" class="tab active" data-i18n="tabs.dashboard" data-tab="dash" type="button">
+     Dashboard
+    </button>
+    <button aria-current="false" class="tab" data-i18n="tabs.programming" data-tab="prog" type="button">
+     Programming
+    </button>
+    <button aria-current="false" class="tab" data-i18n="tabs.setup" data-tab="setup" type="button">
+     Setup
+    </button>
+    <button aria-current="false" class="tab" data-i18n="tabs.backup" data-tab="backup" type="button">
+     Backup
+    </button>
+   </nav>
+   <div id="tab-dash">
+    <div class="page-heading">
+     <div>
+      <h2 data-i18n="tabs.dashboard">
+       Dashboard
+      </h2>
+      <p data-i18n="layout.dashboard_desc">
+       Control your relays and view the inputs in real time.
+      </p>
+     </div>
+     <button class="small" data-i18n="dashboard.all_auto" onclick="setAllAuto()">
+      All AUTO
+     </button>
+    </div>
+    <div class="card" id="login_card">
+     <h3 data-i18n="dashboard.login_title">
+      Login
+     </h3>
+     <div class="muted" data-i18n="dashboard.login_desc">
+      Login required to modify settings.
+     </div>
+     <div class="sep">
+     </div>
+     <div class="inline">
+      <span class="pill" id="auth_status">
+       Not logged
+      </span>
+      <button class="small" data-i18n="setup.logout" id="auth_logout" onclick="logout()" style="display:none;">
+       Logout
+      </button>
+     </div>
+     <div class="sep">
+     </div>
+     <form class="login-form" id="auth_form" onsubmit="login(); return false;">
+      <div class="field">
+       <label data-i18n="setup.user" for="auth_user">
+        User
+       </label>
+       <input autocomplete="username" id="auth_user" placeholder="" type="text"/>
+      </div>
+      <div class="field">
+       <label data-i18n="setup.pass" for="auth_pass">
+        Password
+       </label>
+       <input autocomplete="current-password" id="auth_pass" placeholder="" type="password"/>
+      </div>
+      <button class="primary" data-i18n="setup.login" id="auth_login_btn" type="submit">
+       Login
+      </button>
+     </form>
+    </div>
+    <div class="dashboard-layout">
+     <section class="modules-wrap">
+      <div class="modules" id="inputsView">
+       ...
+      </div>
+     </section>
+     <div class="dashboard-secondary">
+      <div class="row hide" id="tempsRow">
+       <div class="card">
+        <h3 data-i18n="dashboard.temps">
+         Temperatures
+        </h3>
+        <div class="sensor-grid" id="tempsView">
+         ...
         </div>
-        <div class="sep"></div>
-        <form class="inline" id="auth_form" onsubmit="login(); return false;">
-          <span class="muted" data-i18n="setup.user">User</span>
-          <input id="auth_user" type="text" placeholder="">
-          <span class="muted" data-i18n="setup.pass">Pass</span>
-          <input id="auth_pass" type="password" placeholder="">
-          <button class="primary" id="auth_login_btn" onclick="login()" data-i18n="setup.login">Login</button>
-        </form>
+       </div>
       </div>
-    </div>
-
-    <div class="row">
-      <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.inputs">Modules</h3>
-        <div id="inputsView" class="modules">...</div>
-        <div class="sep"></div>
-        <button class="small" onclick="setAllAuto()" data-i18n="dashboard.all_auto">All AUTO</button>
+      <div class="card" id="shutter_dashboard_card">
+       <h3 data-i18n="dashboard.shutters">
+        Shutters
+       </h3>
+       <div id="shutterDash">
+        No shutter configured.
+       </div>
       </div>
+     </div>
     </div>
-
-    <div class="row hide" style="margin-top:12px;" id="tempsRow">
-      <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.temps">Temperatures</h3>
-        <div id="tempsView" class="inline">...</div>
+   </div>
+   <div class="hide" id="tab-prog">
+    <div class="page-heading">
+     <div>
+      <h2 data-i18n="tabs.programming">
+       Programming
+      </h2>
+      <p data-i18n="layout.programming_desc">
+       Configure relay rules, Home Assistant inputs and shutters.
+      </p>
+     </div>
+     <div class="inline">
+      <button class="primary" data-i18n="programming.save_rules" id="rules_save_btn" onclick="saveRules()">
+       Save rules
+      </button>
+      <span class="muted" id="rules_hint">
+      </span>
+     </div>
+    </div>
+    <nav aria-label="prog" class="section-nav">
+     <button aria-pressed="true" class="active" data-i18n="layout.rules" data-section="rules" data-section-group="prog" onclick="switchSection('prog','rules')" type="button">
+      Relay rules
+     </button>
+     <button aria-pressed="false" class="" data-i18n="vinput.title" data-section="virtual" data-section-group="prog" onclick="switchSection('prog','virtual')" type="button">
+      MQTT virtual inputs
+     </button>
+     <button aria-pressed="false" class="" data-i18n="dashboard.shutters" data-section="shutters" data-section-group="prog" onclick="switchSection('prog','shutters')" type="button">
+      Shutters
+     </button>
+    </nav>
+    <section class="section-panel" id="prog-rules">
+     <div class="grid4" id="rulesGrid">
+     </div>
+    </section>
+    <section class="section-panel hide" id="prog-virtual">
+     <div class="card">
+      <h3 data-i18n="vinput.title">
+       Virtual inputs
+      </h3>
+      <div class="muted help-copy" data-i18n="vinput.desc">
+       MQTT virtual inputs let Home Assistant simulate the board's physical inputs and trigger the same relay rules without pressing a wired button. Each VInput activates its corresponding input (VInput 1 → Input 1, etc.). Choose a persistent switch or a momentary push button.
       </div>
-    </div>
-
-    <div class="row" style="margin-top:12px;">
-      <div class="card modules-wrap" style="min-width:320px">
-        <h3 data-i18n="dashboard.shutters">Shutters</h3>
-        <div id="shutterDash" data-i18n="shutter.none">No shutter configured.</div>
+      <div class="grid4 virtual-grid" id="virtualInputsGrid">
       </div>
+     </div>
+    </section>
+    <section class="section-panel hide" id="prog-shutters">
+     <div class="grid2" id="shuttersGrid">
+     </div>
+    </section>
+   </div>
+   <div class="hide" id="tab-setup">
+    <div class="page-heading">
+     <div>
+      <h2 data-i18n="tabs.setup">
+       Setup
+      </h2>
+      <p data-i18n="layout.setup_desc">
+       Network, integrations and device maintenance.
+      </p>
+     </div>
     </div>
-  </div>
-
-  <!-- PROGRAMMATION -->
-  <div id="tab-prog" class="hide">
-    <div class="inline" style="margin:8px 0 12px 0;">
-      <button class="primary" id="rules_save_btn" onclick="saveRules()" data-i18n="programming.save_rules">Save rules</button>
-      <span class="muted" id="rules_hint"></span>
-    </div>
-
-    <div class="card" style="margin-bottom:12px">
-      <h3 data-i18n="vinput.title">Virtual inputs</h3>
-      <div class="muted" data-i18n="vinput.desc">MQTT virtual inputs let Home Assistant simulate the board's physical inputs and trigger the same relay rules without pressing a wired button. Each VInput activates its corresponding input (VInput 1 → Input 1, etc.). Choose a persistent switch or a momentary push button.</div>
-      <div id="virtualInputsGrid" class="grid4" style="margin-top:10px"></div>
-    </div>
-
-    <div id="rulesGrid" class="grid4"></div>
-
-    <div class="sep"></div>
-
-    <div id="shuttersGrid" class="grid2"></div>
-  </div>
-
-  <!-- NETWORK (moved to Setup) -->
-
-  <!-- BACKUP -->
-  <div id="tab-setup" class="hide">
-    <div class="card" style="max-width:640px;">
-      <h3 data-i18n="setup.title">Setup</h3>
-      <div class="muted" data-i18n="setup.desc">Login required to modify settings.</div>
-      <div class="sep"></div>
-      <div class="notice" data-i18n="setup.change_note">Change credentials</div>
-      <div class="form-grid" style="margin-top:8px;">
-        <span class="muted" data-i18n="setup.new_user">New user</span>
-        <input id="auth_new_user" type="text">
-        <span class="muted" data-i18n="setup.new_pass">New pass</span>
-        <input id="auth_new_pass" type="password">
-      </div>
-      <div class="inline" style="margin-top:8px;">
-        <button class="primary" id="auth_save_btn" onclick="saveAuth()" data-i18n="setup.save">Save</button>
-        <span class="muted" id="auth_hint"></span>
-      </div>
-    </div>
-
-    <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="restart.title">Restart device</h3>
-      <div class="muted" data-i18n="restart.desc">Restart the controller without changing its configuration.</div>
-      <div class="sep"></div>
-      <div class="inline">
-        <button class="primary" id="restart_btn" onclick="restartDevice()" data-i18n="restart.button">Restart</button>
-        <span class="muted" id="restart_hint"></span>
-      </div>
-    </div>
-
-    <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="network.title">Network configuration</h3>
-      <div class="sep"></div>
-
-      <div class="form-grid">
-        <span class="muted" data-i18n="network.mac">MAC</span>
-        <span id="net_mac" class="pill">--</span>
-        <span class="muted" data-i18n="network.mode">Mode</span>
+    <nav aria-label="setup" class="section-nav">
+     <button aria-pressed="true" class="active" data-i18n="layout.connectivity" data-section="network" data-section-group="setup" onclick="switchSection('setup','network')" type="button">
+      Network &amp; WiFi
+     </button>
+     <button aria-pressed="false" class="" data-i18n="mqtt.title" data-section="mqtt" data-section-group="setup" onclick="switchSection('setup','mqtt')" type="button">
+      MQTT
+     </button>
+     <button aria-pressed="false" class="" data-i18n="layout.maintenance" data-section="maintenance" data-section-group="setup" onclick="switchSection('setup','maintenance')" type="button">
+      Maintenance
+     </button>
+    </nav>
+    <section class="setup-panel" id="setup-network">
+     <div class="setup-grid">
+      <div class="card">
+       <h3 data-i18n="network.title">
+        Network configuration
+       </h3>
+       <div class="sep">
+       </div>
+       <div class="form-grid">
+        <span class="muted" data-i18n="network.mac">
+         MAC
+        </span>
+        <span class="pill" id="net_mac">
+         --
+        </span>
+        <label class="muted" data-i18n="network.mode" for="net_mode">
+         Mode
+        </label>
         <select id="net_mode">
-          <option value="dhcp" data-i18n="network.mode.dhcp">DHCP</option>
-          <option value="static" data-i18n="network.mode.static">Statique</option>
+         <option data-i18n="network.mode.dhcp" value="dhcp">
+          DHCP
+         </option>
+         <option data-i18n="network.mode.static" value="static">
+          Statique
+         </option>
         </select>
-        <span class="muted" data-i18n="network.ip">IP</span>
-        <input id="net_ip" type="text" placeholder="192.168.1.50">
-        <span class="muted" data-i18n="network.gw">Passerelle</span>
-        <input id="net_gw" type="text" placeholder="192.168.1.1">
-        <span class="muted" data-i18n="network.mask">Masque</span>
-        <input id="net_sn" type="text" placeholder="255.255.255.0">
-        <span class="muted" data-i18n="network.dns">DNS</span>
-        <input id="net_dns" type="text" placeholder="192.168.1.1">
+        <label class="muted" data-i18n="network.ip" for="net_ip">
+         IP
+        </label>
+        <input id="net_ip" placeholder="192.168.1.50" type="text"/>
+        <label class="muted" data-i18n="network.gw" for="net_gw">
+         Passerelle
+        </label>
+        <input id="net_gw" placeholder="192.168.1.1" type="text"/>
+        <label class="muted" data-i18n="network.mask" for="net_sn">
+         Masque
+        </label>
+        <input id="net_sn" placeholder="255.255.255.0" type="text"/>
+        <label class="muted" data-i18n="network.dns" for="net_dns">
+         DNS
+        </label>
+        <input id="net_dns" placeholder="192.168.1.1" type="text"/>
+       </div>
+       <div class="sep">
+       </div>
+       <button class="primary" data-i18n="network.save" id="net_save_btn" onclick="saveNet()">
+        Save network
+       </button>
+       <span class="muted" id="net_mode_hint">
+       </span>
+       <span class="muted" id="net_action_hint">
+       </span>
       </div>
-
-      <div class="sep"></div>
-      <button class="primary" id="net_save_btn" onclick="saveNet()" data-i18n="network.save">Save network</button>
-      <span class="muted" id="net_mode_hint"></span>
-      <span class="muted" id="net_action_hint"></span>
-    </div>
-
-    <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="wifi.title">WiFi Access Point</h3>
-      <div class="muted" data-i18n="wifi.desc">AP always enabled unless explicitly disabled.</div>
-      <div class="sep"></div>
-
-      <div class="inline">
-        <span class="muted" data-i18n="wifi.status">Status</span>
-        <span id="wifi_status" class="pill">--</span>
+      <div class="card">
+       <h3 data-i18n="wifi.title">
+        WiFi Access Point
+       </h3>
+       <div class="muted" data-i18n="wifi.desc">
+        AP always enabled unless explicitly disabled.
+       </div>
+       <div class="sep">
+       </div>
+       <div class="form-grid">
+        <span class="muted" data-i18n="wifi.status">
+         Status
+        </span>
+        <span class="pill" id="wifi_status">
+         --
+        </span>
+        <span class="muted" data-i18n="wifi.ssid">
+         SSID
+        </span>
+        <span class="pill" id="wifi_ssid">
+         --
+        </span>
+        <span class="muted" data-i18n="wifi.pass">
+         Password
+        </span>
+        <span class="pill" id="wifi_pass">
+         --
+        </span>
+        <label class="muted" data-i18n="wifi.new_pass" for="wifi_new_pass">
+         New password
+        </label>
+        <input id="wifi_new_pass" placeholder="********" type="password"/>
+        <span class="muted" data-i18n="wifi.ip">
+         IP
+        </span>
+        <span class="pill" id="wifi_ip">
+         --
+        </span>
+       </div>
+       <div class="inline" style="margin-top:8px;">
+        <button class="small" data-i18n="wifi.save_pass" onclick="saveWifiPass()">
+         Save WiFi password
+        </button>
+       </div>
+       <div class="sep">
+       </div>
+       <button class="primary" data-i18n="wifi.disable" id="wifi_toggle_btn" onclick="toggleWifi()">
+        Disable WiFi
+       </button>
+       <span class="muted" id="wifi_hint">
+       </span>
       </div>
-      <div class="inline" style="margin-top:8px;">
-        <span class="muted" data-i18n="wifi.ssid">SSID</span>
-        <span id="wifi_ssid" class="pill">--</span>
-      </div>
-      <div class="form-grid">
-        <span class="muted" data-i18n="wifi.pass">Password</span>
-        <span id="wifi_pass" class="pill">--</span>
-        <span class="muted" data-i18n="wifi.new_pass">New password</span>
-        <input id="wifi_new_pass" type="password" placeholder="********">
-        <span class="muted" data-i18n="wifi.ip">IP</span>
-        <span id="wifi_ip" class="pill">--</span>
-      </div>
-      <div class="inline" style="margin-top:8px;">
-        <button class="small" onclick="saveWifiPass()" data-i18n="wifi.save_pass">Save WiFi password</button>
-      </div>
-
-      <div class="sep"></div>
-      <button class="primary" id="wifi_toggle_btn" onclick="toggleWifi()" data-i18n="wifi.disable">Disable WiFi</button>
-      <span class="muted" id="wifi_hint"></span>
-    </div>
-
-    <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="mqtt.title">MQTT</h3>
-      <div class="muted" data-i18n="mqtt.desc">Broker + transport configuration.</div>
-      <div class="sep"></div>
-
-      <div class="inline">
-        <label><input id="mqtt_enabled" type="checkbox"> <span data-i18n="mqtt.enable">Enable MQTT</span></label>
-      </div>
-      <div class="inline" style="margin-top:8px;">
-        <label><input id="mqtt_retain" type="checkbox" checked> <span data-i18n="mqtt.retain">Retain</span></label>
-      </div>
-
-      <div class="inline" style="margin-top:8px;">
-        <span class="muted" data-i18n="mqtt.transport">Transport</span>
+     </div>
+    </section>
+    <section class="setup-panel hide" id="setup-mqtt">
+     <div class="mqtt-layout">
+      <div class="card">
+       <h3 data-i18n="mqtt.title">
+        MQTT
+       </h3>
+       <p class="muted" data-i18n="mqtt.desc">
+        Broker and transport configuration.
+       </p>
+       <div class="sep">
+       </div>
+       <div class="mqtt-options">
+        <label class="check-label">
+         <input id="mqtt_enabled" type="checkbox"/>
+         <span data-i18n="mqtt.enable">
+          Enable MQTT
+         </span>
+        </label>
+        <label class="check-label">
+         <input checked="" id="mqtt_retain" type="checkbox"/>
+         <span data-i18n="mqtt.retain">
+          Retain
+         </span>
+        </label>
+       </div>
+       <div class="form-grid">
+        <label class="muted" data-i18n="mqtt.transport" for="mqtt_transport">
+         Transport
+        </label>
         <select id="mqtt_transport">
-          <option value="ethernet" data-i18n="mqtt.transport_ethernet">Ethernet</option>
-          <option value="gsm" data-i18n="mqtt.transport_gsm">GSM (A7670)</option>
-          <option value="auto" selected data-i18n="mqtt.transport_auto">Auto (ETH->GSM)</option>
+         <option data-i18n="mqtt.transport_ethernet" value="ethernet">
+          Ethernet
+         </option>
+         <option data-i18n="mqtt.transport_gsm" value="gsm">
+          GSM (A7670)
+         </option>
+         <option data-i18n="mqtt.transport_auto" selected="" value="auto">
+          Auto (ETH-&gt;GSM)
+         </option>
         </select>
-      </div>
-      <div class="inline" style="margin-top:8px;">
-        <span id="mqtt_ha_status" class="pill">MQTT HA: ?</span>
-        <span id="mqtt_gsm_status" class="pill">MQTT GSM: ?</span>
-      </div>
-      <div class="sep"></div>
-      <h3 data-i18n="mqtt.section_ha">Home Assistant discovery</h3>
-      <div class="muted" data-i18n="mqtt.section_ha_desc">Optional Home Assistant integration settings.</div>
-
-      <div class="form-grid" style="margin-top:8px;">
-        <span class="muted" data-i18n="mqtt.broker">Broker</span>
-        <input id="mqtt_host" type="text" placeholder="192.168.1.43">
-        <span class="muted" data-i18n="mqtt.port">Port</span>
-        <input id="mqtt_port" type="number" min="1" max="65535" value="1883">
-        <span class="muted" data-i18n="mqtt.user">User</span>
-        <input id="mqtt_user" type="text" placeholder="">
-        <span class="muted" data-i18n="mqtt.pass">Pass</span>
-        <input id="mqtt_pass" type="password" placeholder="">
-        <span class="muted" data-i18n="mqtt.client_id">Client ID</span>
-        <input id="mqtt_client" type="text" placeholder="ESPRelay4">
-      </div>
-
-      <div class="sep"></div>
-      <div class="form-grid" style="margin-top:8px;">
-        <span class="muted" data-i18n="mqtt.discovery_prefix">Discovery prefix</span>
-        <input id="mqtt_disc" type="text" placeholder="homeassistant">
-      </div>
-
-      <div class="sep"></div>
-      <h3 data-i18n="mqtt.gsm_card_title">📡 MQTT GSM (A7670)</h3>
-      <div class="muted" data-i18n="mqtt.gsm_card_desc">Dedicated GSM MQTT settings (used in GSM mode and AUTO).</div>
-      <div class="sep"></div>
-
-      <div class="form-grid" style="margin-top:8px;">
-        <span class="muted" data-i18n="mqtt.gsm_broker">GSM broker</span>
-        <input id="mqtt_gsm_host" type="text" placeholder="">
-        <span class="muted" data-i18n="mqtt.gsm_port">GSM port</span>
-        <input id="mqtt_gsm_port" type="number" min="0" max="65535" value="1883">
-        <span class="muted" data-i18n="mqtt.gsm_mqtt_user">GSM MQTT user</span>
-        <input id="mqtt_gsm_mqtt_user" type="text" placeholder="">
-        <span class="muted" data-i18n="mqtt.gsm_mqtt_pass">GSM MQTT pass</span>
-        <input id="mqtt_gsm_mqtt_pass" type="password" placeholder="">
-        <span class="muted" data-i18n="mqtt.apn">APN</span>
-        <input id="mqtt_apn" type="text" placeholder="iot.1nce.net">
-        <span class="muted" data-i18n="mqtt.gsm_user">GSM user</span>
-        <input id="mqtt_gsm_user" type="text" placeholder="">
-        <span class="muted" data-i18n="mqtt.gsm_pass">GSM pass</span>
-        <input id="mqtt_gsm_pass" type="password" placeholder="">
-      </div>
-
-      <div class="sep"></div>
-      <button class="primary" id="mqtt_save_btn" onclick="saveMqtt()" data-i18n="mqtt.save">Save MQTT</button>
-      <span class="muted" id="mqtt_hint"></span>
-    </div>
-
-    <div class="card" style="max-width:640px;margin-top:12px;">
-      <h3 data-i18n="ota.title">OTA Update</h3>
-      <div class="muted" data-i18n="ota.desc">Upload firmware.bin or littlefs.bin</div>
-      <div class="sep"></div>
-      <div id="ota_fw_zone" class="ota-drop-zone">
-        <div class="inline">
-          <input id="ota_fw" type="file" accept=".bin">
-          <button class="small" onclick="uploadOta('fw')" data-i18n="ota.upload_fw">Upload firmware</button>
+       </div>
+       <div class="inline" style="margin-top:8px;">
+        <span class="pill" id="mqtt_ha_status">
+         MQTT HA: ?
+        </span>
+        <span class="pill" id="mqtt_gsm_status">
+         MQTT GSM: ?
+        </span>
+       </div>
+       <div class="sep">
+       </div>
+       <h3 data-i18n="layout.mqtt_broker">
+        Ethernet broker / Home Assistant
+       </h3>
+       <div class="form-grid" style="margin-top:8px;">
+        <label class="muted" data-i18n="mqtt.broker" for="mqtt_host">
+         Broker
+        </label>
+        <input id="mqtt_host" placeholder="192.168.1.43" type="text"/>
+        <label class="muted" data-i18n="mqtt.port" for="mqtt_port">
+         Port
+        </label>
+        <input id="mqtt_port" max="65535" min="1" type="number" value="1883"/>
+        <label class="muted" data-i18n="mqtt.user" for="mqtt_user">
+         User
+        </label>
+        <input id="mqtt_user" placeholder="" type="text"/>
+        <label class="muted" data-i18n="mqtt.pass" for="mqtt_pass">
+         Pass
+        </label>
+        <input id="mqtt_pass" placeholder="" type="password"/>
+        <label class="muted" data-i18n="mqtt.client_id" for="mqtt_client">
+         Client ID
+        </label>
+        <input id="mqtt_client" placeholder="ESPRelay4" type="text"/>
+       </div>
+       <details class="advanced">
+        <summary data-i18n="mqtt.section_ha">
+         Home Assistant discovery
+        </summary>
+        <p class="muted" data-i18n="mqtt.section_ha_desc">
+         Optional Home Assistant integration settings.
+        </p>
+        <div class="form-grid" style="margin-top:8px;">
+         <label class="muted" data-i18n="mqtt.discovery_prefix" for="mqtt_disc">
+          Discovery prefix
+         </label>
+         <input id="mqtt_disc" placeholder="homeassistant" type="text"/>
         </div>
-        <div class="muted ota-drop-hint" data-i18n="ota.drop_fw">Drag and drop firmware.bin here</div>
-      </div>
-      <div id="ota_fs_zone" class="ota-drop-zone" style="margin-top:8px;">
-        <div class="inline">
-          <input id="ota_fs" type="file" accept=".bin">
-          <button class="small" onclick="uploadOta('fs')" data-i18n="ota.upload_fs">Upload FS</button>
+       </details>
+       <details class="advanced">
+        <summary data-i18n="mqtt.gsm_card_title">
+         MQTT GSM
+        </summary>
+        <p class="muted" data-i18n="mqtt.gsm_card_desc">
+         Dedicated GSM MQTT settings.
+        </p>
+        <div class="form-grid" style="margin-top:8px;">
+         <label class="muted" data-i18n="mqtt.gsm_broker" for="mqtt_gsm_host">
+          GSM broker
+         </label>
+         <input id="mqtt_gsm_host" placeholder="" type="text"/>
+         <label class="muted" data-i18n="mqtt.gsm_port" for="mqtt_gsm_port">
+          GSM port
+         </label>
+         <input id="mqtt_gsm_port" max="65535" min="0" type="number" value="1883"/>
+         <label class="muted" data-i18n="mqtt.gsm_mqtt_user" for="mqtt_gsm_mqtt_user">
+          GSM MQTT user
+         </label>
+         <input id="mqtt_gsm_mqtt_user" placeholder="" type="text"/>
+         <label class="muted" data-i18n="mqtt.gsm_mqtt_pass" for="mqtt_gsm_mqtt_pass">
+          GSM MQTT pass
+         </label>
+         <input id="mqtt_gsm_mqtt_pass" placeholder="" type="password"/>
+         <label class="muted" data-i18n="mqtt.apn" for="mqtt_apn">
+          APN
+         </label>
+         <input id="mqtt_apn" placeholder="iot.1nce.net" type="text"/>
+         <label class="muted" data-i18n="mqtt.gsm_user" for="mqtt_gsm_user">
+          GSM user
+         </label>
+         <input id="mqtt_gsm_user" placeholder="" type="text"/>
+         <label class="muted" data-i18n="mqtt.gsm_pass" for="mqtt_gsm_pass">
+          GSM pass
+         </label>
+         <input id="mqtt_gsm_pass" placeholder="" type="password"/>
         </div>
-        <div class="muted ota-drop-hint" data-i18n="ota.drop_fs">Drag and drop littlefs.bin here</div>
+       </details>
+       <div class="inline mqtt-save">
+        <button class="primary" data-i18n="mqtt.save" id="mqtt_save_btn" onclick="saveMqtt()">
+         Save MQTT
+        </button>
+        <span class="muted" id="mqtt_hint">
+        </span>
+       </div>
       </div>
-      <div id="ota_progress_wrap" class="inline" style="margin-top:8px;gap:10px;align-items:center;display:none;">
-        <progress id="ota_progress" value="0" max="100" style="width:220px;"></progress>
-        <span class="muted" id="ota_pct">0%</span>
+     </div>
+    </section>
+    <section class="setup-panel hide" id="setup-maintenance">
+     <div class="setup-grid">
+      <div class="card">
+       <h3 data-i18n="setup.title">
+        Setup
+       </h3>
+       <div class="muted" data-i18n="layout.credentials_desc">
+        Login required to modify settings.
+       </div>
+       <div class="sep">
+       </div>
+       <div class="form-grid" style="margin-top:8px;">
+        <label class="muted" data-i18n="setup.new_user" for="auth_new_user">
+         New user
+        </label>
+        <input id="auth_new_user" type="text"/>
+        <label class="muted" data-i18n="setup.new_pass" for="auth_new_pass">
+         New pass
+        </label>
+        <input id="auth_new_pass" type="password"/>
+       </div>
+       <div class="inline" style="margin-top:8px;">
+        <button class="primary" data-i18n="setup.save" id="auth_save_btn" onclick="saveAuth()">
+         Save
+        </button>
+        <span class="muted" id="auth_hint">
+        </span>
+       </div>
       </div>
-      <div class="muted" id="ota_status" style="margin-top:8px;"></div>
+      <div class="card">
+       <h3 data-i18n="restart.title">
+        Restart device
+       </h3>
+       <div class="muted" data-i18n="restart.desc">
+        Restart the controller without changing its configuration.
+       </div>
+       <div class="sep">
+       </div>
+       <div class="inline">
+        <button class="primary" data-i18n="restart.button" id="restart_btn" onclick="restartDevice()">
+         Restart
+        </button>
+        <span class="muted" id="restart_hint">
+        </span>
+       </div>
+      </div>
+      <div class="card ota-card">
+       <h3 data-i18n="ota.title">
+        OTA Update
+       </h3>
+       <div class="muted" data-i18n="ota.desc">
+        Upload firmware.bin or littlefs.bin
+       </div>
+       <div class="sep">
+       </div>
+       <div class="grid2">
+        <div class="ota-drop-zone" id="ota_fw_zone">
+         <div class="inline">
+          <input accept=".bin" id="ota_fw" type="file"/>
+          <button class="small" data-i18n="ota.upload_fw" onclick="uploadOta('fw')">
+           Upload firmware
+          </button>
+         </div>
+         <div class="muted ota-drop-hint" data-i18n="ota.drop_fw">
+          Drag and drop firmware.bin here
+         </div>
+        </div>
+        <div class="ota-drop-zone" id="ota_fs_zone">
+         <div class="inline">
+          <input accept=".bin" id="ota_fs" type="file"/>
+          <button class="small" data-i18n="ota.upload_fs" onclick="uploadOta('fs')">
+           Upload FS
+          </button>
+         </div>
+         <div class="muted ota-drop-hint" data-i18n="ota.drop_fs">
+          Drag and drop littlefs.bin here
+         </div>
+        </div>
+       </div>
+       <div class="inline" id="ota_progress_wrap" style="margin-top:8px;gap:10px;align-items:center;display:none;">
+        <progress id="ota_progress" max="100" style="width:220px;" value="0">
+        </progress>
+        <span class="muted" id="ota_pct">
+         0%
+        </span>
+       </div>
+       <div class="muted" id="ota_status" style="margin-top:8px;">
+       </div>
+      </div>
+     </div>
+    </section>
+   </div>
+   <div class="hide" id="tab-backup">
+    <div class="page-heading">
+     <div>
+      <h2 data-i18n="tabs.backup">
+       Backup
+      </h2>
+      <p data-i18n="layout.backup_desc">
+       Save the full configuration or restore a previous backup.
+      </p>
+     </div>
     </div>
-  </div>
-
-  <!-- BACKUP -->
-  <div id="tab-backup" class="hide">
-    <div class="card" style="max-width:640px;">
-        <h3 data-i18n="backup.title">Backup / Restore</h3>
-      <div class="muted" data-i18n="backup.desc">Export or import the full configuration (rules + network + MQTT).</div>
-      <div class="sep"></div>
-      <div class="inline">
-        <button class="primary" onclick="downloadBackup()" data-i18n="backup.download">Download backup</button>
-        <span id="backup_status" class="muted"></span>
-        <button class="small" onclick="document.getElementById('backup_file').click()" data-i18n="backup.import">Import backup</button>
-        <input id="backup_file" type="file" accept="application/json" style="display:none">
-      </div>
-      <div class="muted" style="margin-top:8px;" data-i18n="backup.note">Import can change the IP. Reload the page if needed.</div>
-      <div class="sep"></div>
-      <div class="muted" data-i18n="backup.preview">JSON that will be saved</div>
+    <div class="card" id="backup-panel">
+     <h3 data-i18n="backup.title">
+      Backup / Restore
+     </h3>
+     <div class="muted" data-i18n="backup.desc">
+      Export or import rules, network, MQTT, WiFi, BLE and access credentials.
+     </div>
+     <div class="sep">
+     </div>
+     <div class="inline">
+      <button class="primary" data-i18n="backup.download" onclick="downloadBackup()">
+       Download backup
+      </button>
+      <span class="muted" id="backup_status">
+      </span>
+      <button class="small" data-i18n="backup.import" onclick="document.getElementById('backup_file').click()">
+       Import backup
+      </button>
+      <input accept="application/json" id="backup_file" style="display:none" type="file"/>
+     </div>
+     <div class="muted" data-i18n="backup.note" style="margin-top:8px;">
+      Import can change the IP and access credentials. The backup contains passwords: keep it private.
+     </div>
+     <div class="sep">
+     </div>
+     <details class="advanced">
+      <summary data-i18n="backup.preview">
+       JSON that will be saved
+      </summary>
       <pre id="backup_json">{}</pre>
+     </details>
     </div>
-  </div>
-
-  <div class="sep"></div>
-  <div class="muted" style="text-align:center;">(c) Labotronik 2026</div>
-
-<script>
+   </div>
+  </main>
+  <span aria-live="polite" id="msg" role="status"></span>
+  <footer class="footer-inner">
+   © Labotronik 2026 · ESPRelay4
+  </footer>
+ <script>
 let i18n = {};
 let lang = localStorage.getItem("lang") || "en";
 let authUser = localStorage.getItem("auth_user") || "";
@@ -489,6 +883,7 @@ function authHeader(){
 
 function setAuthState(ok, userLabel=""){
   isAuthed = !!ok;
+  if(!isAuthed) rulesLoaded = false;
   const restricted = new Set(["prog","backup","setup"]);
   document.querySelectorAll(".tab").forEach(tab=>{
     const name = tab.dataset.tab;
@@ -626,6 +1021,17 @@ function toast(text, ok=true){
   const ms = ok ? 2500 : 6000;
   setTimeout(()=>{ m.textContent=""; m.className=""; }, ms);
 }
+function switchSection(group, name){
+  const sections = {prog:["rules","virtual","shutters"], setup:["network","mqtt","maintenance"]};
+  if(!sections[group]?.includes(name)) return;
+  sections[group].forEach(section => $(group+"-"+section).classList.toggle("hide", section !== name));
+  document.querySelectorAll(`[data-section-group="${group}"]`).forEach(button=>{
+    const active = button.dataset.section === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
 function switchTab(name){
   const restricted = new Set(["prog","backup","setup"]);
   if(restricted.has(name) && !isAuthed){
@@ -634,7 +1040,9 @@ function switchTab(name){
   }
   for(const t of ["dash","prog","setup","backup"]){
     $("tab-"+t).classList.toggle("hide", t!==name);
-    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
+    const button = document.querySelector(`.tab[data-tab="${t}"]`);
+    button.classList.toggle("active", t===name);
+    button.setAttribute("aria-current", t===name ? "page" : "false");
   }
   if(name === "prog" && rules) renderSimpleRules();
   if(name === "setup") { loadNet(); loadMqtt(); loadWifi(); }
@@ -724,7 +1132,13 @@ async function apiJson(path, opts){
 const getState = ()=>apiJson("/api/state");
 const getAuth = ()=>apiJson("/api/auth");
 const getRules = ()=>apiJson("/api/rules");
-const putRules = (body)=>apiJson("/api/rules",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const putRules = (body)=>{
+  if(!rulesLoaded) return Promise.reject(new Error(t("rules.reload_required","Reload the board rules before changing them.")));
+  return apiJson("/api/rules",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).catch(e => {
+    if(String(e.message).startsWith("409")) rulesLoaded = false;
+    throw e;
+  });
+};
 const postOverride = (relay, mode)=>apiJson("/api/override",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({relay,mode})});
 const postShutter = (cmd,id=1)=>apiJson("/api/shutter",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cmd,id})});
 const getNet = ()=>apiJson("/api/net");
@@ -740,6 +1154,7 @@ const postRestart = ()=>apiJson("/api/restart",{method:"POST",timeoutMs:5000,ret
 
 // -------- data model --------
 let rules = null;
+let rulesLoaded = false;
 let lastState = null;
 let netCfg = null;
 let wifiCfg = {enabled:1, ssid:"", pass: WIFI_DEFAULT_PASS, ap:0, ip:""};
@@ -784,6 +1199,9 @@ function updateHeartbeatIndicator(){
   const staleUptime = lastUptimeChangeMs === 0 ? true : (now - lastUptimeChangeMs > 6000);
   if(staleFetch || staleUptime) dot.classList.add("offline");
   else dot.classList.remove("offline");
+  const label = staleFetch || staleUptime ? t("layout.board_offline","Board offline") : t("layout.board_online","Board online");
+  dot.setAttribute("aria-label", label);
+  dot.title = label;
 }
 
 function defaultRules(){
@@ -829,19 +1247,21 @@ function renderVirtualInputs(){
     const momentary = cfg.type === "momentary";
     return `
       <div class="subcard">
-        <b>VInput ${i+1}</b>
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">${t("vinput.type","Type")}</span>
-          <select data-vi="${i}" data-field="type" onchange="onVirtualInputChanged(event)">
+        <h3>VInput ${i+1}</h3>
+        <div class="field">
+          <label for="vi_type_${i}">${t("vinput.type","Type")}</label>
+          <select id="vi_type_${i}" data-vi="${i}" data-field="type" onchange="onVirtualInputChanged(event)">
             <option value="switch" ${momentary?"":"selected"}>${t("vinput.type_switch","Switch")}</option>
             <option value="momentary" ${momentary?"selected":""}>${t("vinput.type_momentary","Momentary push button")}</option>
           </select>
         </div>
-        <div class="inline" style="margin-top:8px;${momentary?"":"display:none;"}">
-          <span class="muted">${t("vinput.pulse_ms","Pulse")}</span>
-          <input type="number" min="10" max="60000" value="${Number(cfg.pulse_ms || 250)}"
-                 data-vi="${i}" data-field="pulse_ms" onchange="onVirtualInputChanged(event)">
-          <span class="muted">ms</span>
+        <div class="field ${momentary?"":"hide"}">
+          <label for="vi_pulse_${i}">${t("vinput.pulse_ms","Pulse duration")}</label>
+          <div class="input-unit">
+            <input id="vi_pulse_${i}" type="number" min="10" max="60000" value="${Number(cfg.pulse_ms || 250)}"
+                   data-vi="${i}" data-field="pulse_ms" onchange="onVirtualInputChanged(event)">
+            <span>ms</span>
+          </div>
         </div>
       </div>`;
   }).join("");
@@ -905,81 +1325,43 @@ function ruleCard(i, r, isShutterRelay){
   if(!r.expr) r.expr = {op:"NONE"};
   const op = r.expr.op || "FOLLOW";
   const checked = new Set();
-  if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE"){
-    checked.add(r.expr.in || 1);
-  } else {
-    (r.expr.ins || []).forEach(x=>checked.add(x));
-  }
-
+  if(op==="FOLLOW" || op==="TOGGLE_RISE" || op==="PULSE_RISE") checked.add(r.expr.in || 1);
+  else (r.expr.ins || []).forEach(x=>checked.add(x));
+  const disabled = isShutterRelay ? "disabled" : "";
   const modeOptions = getModes().map(m => `<option value="${m.id}" ${m.id===op?"selected":""}>${m.label}</option>`).join("");
-
-  const inputsHtml = Array.from({length: totalInputs || 4}).map((_,idx)=>{
-    const n = idx + 1;
-    return `
-      <label style="margin-right:10px;">
-        <input type="checkbox" data-ri="${i}" data-in="${n}" ${checked.has(n)?"checked":""} onchange="onInputsChanged(event)" ${isShutterRelay ? "disabled" : ""}>
-        E${n}
-      </label>`;
+  const inputsHtml = Array.from({length:totalInputs || 4}).map((_,idx)=>{
+    const n = idx+1;
+    return `<label><input type="checkbox" data-ri="${i}" data-in="${n}" ${checked.has(n)?"checked":""} onchange="onInputsChanged(event)" ${disabled}>E${n}</label>`;
   }).join("");
-
-  const inv = !!r.invert;
-  const onDelay = Number(r.onDelay||0);
-  const offDelay = Number(r.offDelay||0);
-  const pulseMs = Number(r.pulseMs||200);
-
-  const pulseRow = (op==="PULSE_RISE")
-    ? `<div class="inline" style="margin-top:8px;">
-         <span class="muted">${t("rule.pulse_ms","pulseMs")}</span>
-         <input type="number" min="10" max="60000" value="${pulseMs}" data-ri="${i}" data-field="pulseMs" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
-         <span class="muted">ms</span>
-       </div>`
-    : "";
-
-  const shutterBadge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">${t("shutter.badge","SHUTTER")}</span>` : "";
+  const onDelay = Number(r.onDelay||0), offDelay = Number(r.offDelay||0);
+  const durationField = (field,label,value,min,max)=>`
+    <div class="field">
+      <label for="rule_${field}_${i}">${label}</label>
+      <div class="input-unit"><input id="rule_${field}_${i}" type="number" min="${min}" max="${max}" value="${value}" data-ri="${i}" data-field="${field}" onchange="onFieldChanged(event)" ${disabled}><span>ms</span></div>
+    </div>`;
   return `
-    <div class="card ${isShutterRelay ? "shutter-relay" : ""}">
-      <h3>${tf("rule.relay_title",{n:i+1},"Relay R{n}")} ${shutterBadge}</h3>
-
-      <div class="inline">
-        <span class="muted">${t("rule.mode","Mode")}</span>
-        <select data-ri="${i}" data-field="op" onchange="onModeChanged(event)" ${isShutterRelay ? "disabled" : ""}>${modeOptions}</select>
+    <div class="card rule-card ${isShutterRelay ? "shutter-relay" : ""}">
+      <div class="module-heading"><h3>${tf("rule.relay_title",{n:i+1},"Relay R{n}")}</h3>${isShutterRelay ? `<span class="pill shutter">${t("shutter.badge","SHUTTER")}</span>` : ""}</div>
+      <div class="field">
+        <label for="rule_op_${i}">${t("rule.mode","Mode")}</label>
+        <select id="rule_op_${i}" data-ri="${i}" data-field="op" onchange="onModeChanged(event)" ${disabled}>${modeOptions}</select>
       </div>
-
-      <div class="hr"></div>
-
-      <div><b>${t("rule.inputs","Inputs")}</b></div>
-      <div class="inline" style="margin-top:6px;">${inputsHtml}</div>
-
-      <div class="hr"></div>
-
-      <div class="inline">
-        <label><input type="checkbox" data-ri="${i}" data-field="invert" ${inv?"checked":""} onchange="onInvertChanged(event)" ${isShutterRelay ? "disabled" : ""}> ${t("rule.invert","Invert")}</label>
-      </div>
-
-      <div class="hr"></div>
-
-      <div class="inline">
-        <span class="muted">${t("rule.on_delay","onDelay")}</span>
-        <input type="number" min="0" max="600000" value="${onDelay}" data-ri="${i}" data-field="onDelay" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
-        <span class="muted">ms</span>
-      </div>
-
-      <div class="inline" style="margin-top:8px;">
-        <span class="muted">${t("rule.off_delay","offDelay")}</span>
-        <input type="number" min="0" max="600000" value="${offDelay}" data-ri="${i}" data-field="offDelay" onchange="onFieldChanged(event)" ${isShutterRelay ? "disabled" : ""}>
-        <span class="muted">ms</span>
-      </div>
-
-      ${pulseRow}
-
-      <div class="hr"></div>
-
-      <div class="inline">
-        <button class="small" id="rule_apply_btn_${i}" onclick="applyOne(${i})" ${isShutterRelay ? "disabled" : ""}>${tf("rule.apply",{n:i+1},"Apply R{n}")}</button>
+      <span class="muted">${t("rule.inputs","Inputs")}</span>
+      <div class="choice-list">${inputsHtml}</div>
+      <label class="check-label"><input type="checkbox" data-ri="${i}" data-field="invert" ${r.invert?"checked":""} onchange="onInvertChanged(event)" ${disabled}>${t("rule.invert","Invert")}</label>
+      ${op==="PULSE_RISE" ? `<div class="pulse-field">${durationField("pulseMs",t("rule.pulse_ms","Pulse duration"),Number(r.pulseMs||200),10,60000)}</div>` : ""}
+      <details class="advanced" ${onDelay || offDelay ? "open" : ""}>
+        <summary>${t("layout.timings","Timing")}</summary>
+        <div class="field-pair">
+          ${durationField("onDelay",t("rule.on_delay","ON delay"),onDelay,0,600000)}
+          ${durationField("offDelay",t("rule.off_delay","OFF delay"),offDelay,0,600000)}
+        </div>
+      </details>
+      <div class="card-footer">
+        <button class="small" id="rule_apply_btn_${i}" onclick="applyOne(${i})" ${disabled}>${tf("rule.apply",{n:i+1},"Apply R{n}")}</button>
         <span class="muted" id="rule_hint_${i}"></span>
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
 function renderSimpleRules(){
@@ -1012,7 +1394,7 @@ window.onFieldChanged = (ev)=>{
   renderJsonBoxes();
 };
 window.applyOne = async (i)=>{
-  if(!requireAuth()) return;
+  if(!requireAuth() || !requireRulesLoaded()) return;
   const hintId = `rule_hint_${i}`;
   const btn = $(`rule_apply_btn_${i}`);
   if(btn) btn.disabled = true;
@@ -1057,82 +1439,37 @@ function renderShutterCards(){
   const count = maxShutters();
   const cards = [];
   for(let i=0;i<count;i++){
+    const mapping = (direction,label)=>`
+      <div class="subcard">
+        <h3>${label}</h3>
+        <div class="field"><label for="${shId(i,direction+"_in")}">${t("shutter.input","Input")}</label><select id="${shId(i,direction+"_in")}"></select></div>
+        <div class="field"><label for="${shId(i,direction+"_relay")}">${t("shutter.relay","Relay")}</label><select id="${shId(i,direction+"_relay")}"></select></div>
+      </div>`;
     cards.push(`
-      <div class="card">
+      <div class="card shutter-card">
         <h3>${tf("shutter.title",{n:i+1},"Shutter {n}")}</h3>
-        <div class="muted">${tf("shutter.desc",{n:i+1},"Shutter {n} (2 relays). Relays must not overlap.")}</div>
+        <p class="muted">${tf("shutter.desc",{n:i+1},"Shutter {n} uses 2 separate relays.")}</p>
         <div class="sep"></div>
-
-        <div class="inline">
-          <span class="muted">${t("shutter.name","Name")}</span>
-          <input id="${shId(i,"name")}" type="text" value="${tf("shutter.default_name",{n:i+1},"Shutter {n}")}" />
-        </div>
-
+        <div class="field"><label for="${shId(i,"name")}">${t("shutter.name","Name")}</label><input id="${shId(i,"name")}" type="text" value="${tf("shutter.default_name",{n:i+1},"Shutter {n}")}"></div>
+        <div class="two">${mapping("up",t("shutter.cmd_up","Open"))}${mapping("down",t("shutter.cmd_down","Close"))}</div>
         <div class="sep"></div>
-
-        <div class="two">
-          <div>
-            <div class="muted"><b>${t("shutter.cmd_up","UP command")}</b></div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">${t("shutter.input","Input")}</span>
-              <select id="${shId(i,"up_in")}"></select>
-            </div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">${t("shutter.relay","Relay")}</span>
-              <select id="${shId(i,"up_relay")}"></select>
-            </div>
-          </div>
-
-          <div>
-            <div class="muted"><b>${t("shutter.cmd_down","DOWN command")}</b></div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">${t("shutter.input","Input")}</span>
-              <select id="${shId(i,"down_in")}"></select>
-            </div>
-            <div class="inline" style="margin-top:6px;">
-              <span class="muted">${t("shutter.relay","Relay")}</span>
-              <select id="${shId(i,"down_relay")}"></select>
-            </div>
-          </div>
+        <div class="field"><label for="${shId(i,"mode")}">${t("shutter.mode","Mode")}</label>
+          <select id="${shId(i,"mode")}"><option value="hold">${t("shutter.mode_hold","hold (momentary)")}</option><option value="toggle">${t("shutter.mode_toggle","toggle (press = run/stop)")}</option></select>
         </div>
-
-        <div class="sep"></div>
-
-        <div class="inline">
-          <span class="muted">${t("shutter.mode","Mode")}</span>
-          <select id="${shId(i,"mode")}">
-            <option value="hold">${t("shutter.mode_hold","hold (momentary)")}</option>
-            <option value="toggle">${t("shutter.mode_toggle","toggle (press = run/stop)")}</option>
-          </select>
+        <div class="field"><label for="${shId(i,"priority")}">${t("shutter.priority","Priority when both buttons pressed")}</label>
+          <select id="${shId(i,"priority")}"><option value="stop">${t("shutter.priority_stop","stop (recommended)")}</option><option value="up">${t("shutter.priority_up","up")}</option><option value="down">${t("shutter.priority_down","down")}</option></select>
         </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">${t("shutter.priority","Priority when 2 buttons")}</span>
-          <select id="${shId(i,"priority")}">
-            <option value="stop">${t("shutter.priority_stop","stop (recommended)")}</option>
-            <option value="up">${t("shutter.priority_up","up")}</option>
-            <option value="down">${t("shutter.priority_down","down")}</option>
-          </select>
+        <div class="field-pair">
+          <div class="field"><label for="${shId(i,"dead")}">${t("shutter.dead_time","Safety delay")}</label><div class="input-unit"><input id="${shId(i,"dead")}" type="number" min="0" max="5000" value="400"><span>ms</span></div></div>
+          <div class="field"><label for="${shId(i,"max")}">${t("shutter.max_time","Max time")}</label><div class="input-unit"><input id="${shId(i,"max")}" type="number" min="0" max="120000" value="25000"><span>ms</span></div></div>
         </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">${t("shutter.dead_time","Dead-time")}</span>
-          <input id="${shId(i,"dead")}" type="number" min="0" max="5000" value="400" />
-          <span class="muted">ms</span>
+        <span class="muted">${t("shutter.max_time_off","0 ms = disabled")}</span>
+        <div class="card-footer">
+          <button class="primary" id="shutter_apply_btn_${i}" onclick="applyShutter(${i})">${t("shutter.add_update","Add / Update")}</button>
+          <button class="small danger" onclick="removeShutter(${i}, this)">${t("shutter.remove","Remove shutter")}</button>
+          <span class="muted" id="shutter_hint_${i}"></span>
         </div>
-
-        <div class="inline" style="margin-top:8px;">
-          <span class="muted">${t("shutter.max_time","Max time")}</span>
-          <input id="${shId(i,"max")}" type="number" min="0" max="120000" value="25000" />
-          <span class="muted">${t("shutter.max_time_off","ms (0 = disabled)")}</span>
-        </div>
-
-        <div class="sep"></div>
-        <button class="primary" id="shutter_apply_btn_${i}" onclick="applyShutter(${i})">${t("shutter.add_update","Add / Update")}</button>
-        <span class="muted" id="shutter_hint_${i}"></span>
-        <button class="small" onclick="removeShutter(${i}, this)">${t("shutter.remove","Remove shutter")}</button>
-      </div>
-    `);
+      </div>`);
   }
   grid.innerHTML = cards.join("");
 
@@ -1188,7 +1525,7 @@ function setUIFromShutter(idx, sh){
 }
 
 async function applyShutter(idx){
-  if(!requireAuth()) return;
+  if(!requireAuth() || !requireRulesLoaded()) return;
   const hintId = `shutter_hint_${idx}`;
   const btn = $(`shutter_apply_btn_${idx}`);
   if(btn) btn.disabled = true;
@@ -1216,7 +1553,7 @@ async function applyShutter(idx){
   }
 }
 async function removeShutter(idx, btn){
-  if(!requireAuth()) return;
+  if(!requireAuth() || !requireRulesLoaded()) return;
   if(shutterActionInFlight) return;
   try{
     shutterActionInFlight = true;
@@ -1294,88 +1631,38 @@ function renderState(s){
 
   const shRelays = getShutterRelaySet();
   const modules = [];
-  const inCount = s.inputs?.length || 0;
-  const reCount = s.relays?.length || 0;
-  const modCount = Math.max(1, Math.ceil(Math.max(inCount, reCount) / 4));
-
+  const modCount = Math.max(1, Math.ceil(Math.max(s.inputs?.length || 0, s.relays?.length || 0) / 4));
   for(let m=0; m<modCount; m++){
     const base = m*4;
-    const inSlice = (s.inputs || []).slice(base, base+4);
-    const reSlice = (s.relays || []).slice(base, base+4);
-
     const rowsHtml = Array.from({length:4}).map((_,idx)=>{
-      const inVal = (s.inputs && (base+idx) < s.inputs.length) ? s.inputs[base+idx] : null;
-      const reVal = (s.relays && (base+idx) < s.relays.length) ? s.relays[base+idx] : null;
-
-      const inputCell = (inVal === null)
-        ? `<div class="muted">--</div>`
-        : `<div style="margin:4px 0;display:flex;align-items:center;gap:6px;"><span class="led ${inVal?'on':''}"></span><b>E${base+idx+1}</b></div>`;
-
-      let relayCell = `<div class="muted">--</div>`;
+      const i = base+idx;
+      const inVal = s.inputs?.[i] ?? null, reVal = s.relays?.[i] ?? null;
+      const inputCell = inVal === null ? `<span class="muted">--</span>` :
+        `<div class="input-state"><span class="led ${inVal?'on':''}"></span><b>E${i+1}</b><span class="muted">${inVal?t("state.on","ON"):t("state.off","OFF")}</span></div>`;
+      let relayCell = `<span class="muted">--</span>`;
+      let autoCell = `<span></span>`;
       if(reVal !== null){
-        const i = base + idx;
-        const isShutterRelay = shRelays.has(i+1);
-        const ov = (s.override && s.override[i] !== undefined) ? s.override[i] : -1;
-        const modeLabel = ov===-1 ? t("relay.auto","AUTO") : (ov===1 ? t("relay.force_on","FORCE ON") : t("relay.force_off","FORCE OFF"));
-        const badge = isShutterRelay ? `<span class="pill shutter" style="margin-left:6px;">${t("shutter.badge","SHUTTER")}</span>` : "";
-        const stateChecked = reVal ? "checked" : "";
-        const modeHtml = isShutterRelay ? "" : `<div class="muted" style="margin-top:6px;font-size:.85em;">${modeLabel}</div>`;
-        const autoBtn = ov===-1 ? "" : `<button class="small" style="font-size:.8em" onclick="setOverride(${i+1},'AUTO')">${t("relay.auto","AUTO")}</button>`;
-        const overrideHtml = isShutterRelay ? "" : `
-            <div class="relay-row" style="margin-top:6px;">
-              <div class="relay-left">
-                ${autoBtn}
-              </div>
-            </div>
-        `;
-        const onEmoji = reVal ? `<span style="margin-left:6px;">⚡</span>` : "";
-        relayCell = `
-          <div class="${isShutterRelay ? "shutter-relay" : ""}" style="margin:4px 0;">
-            <div class="relay-row">
-              <div class="relay-left">
-                <b>R${i+1}</b>${badge}
-                ${isShutterRelay ? "" : `
-                  <label class="switch" style="margin-left:6px;">
-                    <input type="checkbox" ${stateChecked} onchange="setOverride(${i+1}, this.checked ? 'FORCE_ON' : 'FORCE_OFF')">
-                    <span class="slider"></span>
-                  </label>
-                  ${onEmoji}
-                `}
-              </div>
-            </div>
-            ${modeHtml}
-            ${overrideHtml}
-          </div>
-        `;
+        const isShutter = shRelays.has(i+1);
+        const ov = s.override?.[i] ?? -1;
+        const mode = ov===-1 ? t("relay.auto","AUTO") : (ov===1 ? t("relay.force_on","FORCE ON") : t("relay.force_off","FORCE OFF"));
+        relayCell = `<div class="relay-control">
+          <b>R${i+1}</b>
+          ${isShutter ? `<span class="muted" style="text-align:center;font-size:20px;" aria-hidden="true">↕</span>` : `<label class="switch"><input type="checkbox" ${reVal?"checked":""} ${isAuthed?"":"disabled"} aria-label="${tf("layout.relay_control",{n:i+1},"Control relay R{n}")}" onchange="setOverride(${i+1}, this.checked ? 'FORCE_ON' : 'FORCE_OFF')"><span class="slider"></span></label>`}
+          <div class="relay-meta"><span class="${reVal?'on':'muted'}">${reVal?t("state.on","ON"):t("state.off","OFF")}</span><span class="relay-mode">${isShutter?t("shutter.badge","SHUTTER"):mode}</span></div>
+        </div>`;
+        if(!isShutter) autoCell = `<button class="auto-button" onclick="setOverride(${i+1},'AUTO')" ${ov===-1 || !isAuthed ? 'disabled' : ''}>${t("relay.auto","AUTO")}</button>`;
       }
-
-      return `
-        <div class="two">
-          <div class="subcard">${relayCell}</div>
-          <div class="subcard">${inputCell}</div>
-        </div>
-        
-      `;
+      return `<div class="channel-row">${relayCell}${inputCell}${autoCell}</div>`;
     }).join("");
-
-    const statusBadge = (s.modules_status && s.modules_status[m] === 0)
-      ? `<span class="pill" style="margin-left:6px;">OFFLINE</span>`
-      : "";
-    const failCount = (s.modules_fail && typeof s.modules_fail[m] === "number") ? s.modules_fail[m] : null;
-    const failBadge = (failCount !== null && failCount > 0)
-      ? `<span class="pill" style="margin-left:6px;">read fail: ${failCount}</span>`
-      : "";
-    modules.push(`
-      <div class="module-card">
-        <b>${tf("module.title",{n:m+1},"Module {n}")}</b>${statusBadge}${failBadge}
-        <div class="sep"></div>
-        <div class="two" style="margin-bottom:6px;">
-          <div><b>${t("dashboard.relays","Relays")}</b></div>
-          <div><b>${t("module.inputs","Inputs")}</b></div>
-        </div>
-        ${rowsHtml || "<div class=\"muted\">--</div>"}
-      </div>
-    `);
+    const statusBadge = s.modules_status?.[m] === 0 ? `<span class="pill err">${t("module.offline","Offline")}</span>` : "";
+    const failCount = s.modules_fail?.[m] || 0;
+    const failBadge = failCount > 0 ? `<span class="pill">${tf("module.read_failures",{n:failCount},"Read errors: {n}")}</span>` : "";
+    const outputFaultBadge = s.modules_output_ok?.[m] === 0 ? `<span class="pill err">${t("module.outputs_unconfirmed","Outputs not confirmed")}</span>` : "";
+    modules.push(`<div class="module-card">
+      <div class="module-heading"><h3>${tf("module.title",{n:m+1},"Module {n}")}</h3><div class="module-badges">${statusBadge}${failBadge}${outputFaultBadge}</div></div>
+      <div class="channel-header"><span>${t("dashboard.relays","Relays")}</span><span>${t("module.inputs","Inputs")}</span></div>
+      ${rowsHtml}
+    </div>`);
   }
   $("inputsView").innerHTML = modules.join("");
   const relaysView = $("relaysView");
@@ -1389,8 +1676,8 @@ function renderState(s){
     tempsRow.classList.remove("hide");
     tempsView.innerHTML = s.temps.map(t=>{
       const v = (typeof t.c === "number") ? `${t.c.toFixed(2)} °C` : "--";
-      const h = (typeof t.h === "number") ? ` • ${t.h.toFixed(1)} %` : "";
-      return `<span class="chip">${t.addr}: <span class="on">${v}${h}</span></span>`;
+      const h = (typeof t.h === "number") ? `<small>${t.h.toFixed(1)} %</small>` : "";
+      return `<div class="sensor-tile"><span class="muted">${escapeHtml(t.addr || "--")}</span><b>${v}</b>${h}</div>`;
     }).join("");
   } else {
     tempsRow.classList.add("hide");
@@ -1420,8 +1707,9 @@ async function setAllAuto(){
 
 function renderShutterDash(){
   const shs = rules?.shutters || [];
-  const hasAny = shs.slice(0, maxShutters()).some(sh=>sh && typeof sh === "object");
+  const hasAny = shs.slice(0,maxShutters()).some(sh=>sh && typeof sh === "object");
   if(!hasAny){
+    $("shutterDash").className = "muted";
     $("shutterDash").textContent = t("shutter.none","No shutter configured.");
     return;
   }
@@ -1429,25 +1717,20 @@ function renderShutterDash(){
   for(let idx=0; idx<maxShutters(); idx++){
     const sh = shs[idx];
     if(!sh || typeof sh !== "object") continue;
-    parts.push(`
+    parts.push(`<div class="shutter-tile">
+      <b>${escapeHtml(sh.name || tf("shutter.default_name",{n:idx+1},"Shutter {n}"))}</b>
+      <div class="muted">${tf("shutter.relay_map",{up:sh.up_relay,down:sh.down_relay},"UP=R{up} / DOWN=R{down}")}</div>
       <div class="inline">
-        <span class="pill">${sh.name || tf("shutter.default_name",{n:idx+1},"Shutter {n}")}</span>
-        <span class="muted">${tf("shutter.relay_map",{up:sh.up_relay,down:sh.down_relay},"UP=R{up} / DOWN=R{down}")}</span>
+        <button onclick="shutterUp(${idx+1})">${t("shutter.up","Open")}</button>
+        <button onclick="shutterStop(${idx+1})">${t("shutter.stop","Stop")}</button>
+        <button onclick="shutterDown(${idx+1})">${t("shutter.down","Close")}</button>
       </div>
-      <div class="sep"></div>
-      <div class="inline">
-        <button class="primary" onclick="shutterUp(${idx+1})">${t("shutter.up","UP")}</button>
-        <button class="primary" onclick="shutterStop(${idx+1})">${t("shutter.stop","STOP")}</button>
-        <button class="primary" onclick="shutterDown(${idx+1})">${t("shutter.down","DOWN")}</button>
-      </div>
-      <div class="muted" style="margin-top:8px">
-        ${t("shutter.command_hint","Command via shutter API.")}
-      </div>
-      ${idx === maxShutters()-1 ? "" : "<div class=\"sep\"></div>"}
-    `);
+    </div>`);
   }
+  $("shutterDash").className = "shutter-dashboard-grid";
   $("shutterDash").innerHTML = parts.join("");
 }
+
 async function shutterStop(id){
   if(!requireAuth()) return;
   const sh = rules?.shutters?.[id-1]; if(!sh) return;
@@ -1925,6 +2208,15 @@ $("backup_file").addEventListener("change", async (ev)=>{
   }
 });
 
+function requireRulesLoaded(){
+  if(rulesLoaded) return true;
+  toast(t("rules.reload_required","Reload the board rules before changing them."), false);
+  return false;
+}
+function escapeHtml(value){
+  return String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
 async function loadRules(){
   if(!isAuthed) return;
   try{
@@ -1934,21 +2226,28 @@ async function loadRules(){
         renderState(s);
       }catch(e){ /* ignore */ }
     }
-    rules = ensureRulesBase(await getRules());
-    toast(t("toast.rules_loaded","Rules loaded"));
+    const loaded = await getRules();
+    if(!loaded || !Array.isArray(loaded.relays) || loaded.relays.length !== totalRelays ||
+       loaded.relays.some(r => !r || !r.expr || typeof r.expr.op !== "string")) throw new Error("Réponse de règles invalide");
+    rules = ensureRulesBase(loaded);
+    rulesLoaded = true;
   }catch(e){
-    rules = ensureRulesBase(defaultRules());
-    toast(t("toast.rules_unavailable","GET /api/rules unavailable (fallback)"), false);
+    rulesLoaded = false;
+    if(!rules) rules = ensureRulesBase(defaultRules());
+    toast(t("rules.read_failed","Could not read the rules. Changes are blocked until a successful reload."), false);
   }
 
   renderShutterCards();
 
   renderAll();
   if(lastState) renderState(lastState);
+  document.querySelectorAll('#rules_save_btn, [id^="rule_apply_btn_"], [id^="shutter_apply_btn_"]').forEach(btn => {
+    if(!rulesLoaded) btn.disabled = true;
+  });
 }
 
 async function saveRules(){
-  if(!requireAuth()) return;
+  if(!requireAuth() || !requireRulesLoaded()) return;
   const saveBtn = $("rules_save_btn");
   if(saveBtn) saveBtn.disabled = true;
   setActionHint("rules_hint", t("rules.saving","Saving rules..."), "muted");
@@ -1963,7 +2262,7 @@ async function saveRules(){
     setActionHint("rules_hint", e.message || t("rules.save_failed","Save failed"), "err", 8000);
     toast(e.message, false);
   } finally {
-    if(saveBtn) saveBtn.disabled = false;
+    if(saveBtn) saveBtn.disabled = !rulesLoaded;
   }
 }
 

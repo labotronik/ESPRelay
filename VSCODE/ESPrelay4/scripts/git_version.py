@@ -28,3 +28,6 @@ except Exception:
     tag = ""
 
 env.Append(BUILD_FLAGS=[f'-DFW_VERSION=\\"{ver}\\"', f'-DFW_TAG=\\"{tag}\\"'])
+
+# Share the exact embedded version with the HTTP uploader for post-reboot checks.
+env["ESPRELAY_FW_VERSION"] = ver

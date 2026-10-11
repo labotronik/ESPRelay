@@ -38,6 +38,9 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <DHT.h>
+#include "control_time.h"
+#include "ble_command.h"
+#include <freertos/queue.h>
 
 #ifndef RXD0
 #define RXD0 44
@@ -119,10 +122,12 @@ EthernetServerCompat server(80);
 static WiFiServer wifiServer(80);
 static DNSServer wifiDns;
 
-// BLE (read-only state JSON)
+// BLE state notifications and relay / virtual input commands
 static NimBLEServer* bleServer = nullptr;
 static NimBLECharacteristic* bleStateChar = nullptr;
 static NimBLECharacteristic* bleStateReadChar = nullptr;
+static NimBLECharacteristic* bleCommandChar = nullptr;
+static QueueHandle_t bleCommandQueue = nullptr;
 static bool bleClientConnected = false;
 static uint32_t bleLastNotifyMs = 0;
 static String bleServiceUuid;
@@ -268,15 +273,18 @@ static uint32_t mqttLastEthFailMs = 0;
 static int mqttLastEthFailRc = 0;
 static bool mqttEthAuthBlocked = false;
 static bool mqttStartupGraceLogged = false;
+static bool mqttStartupGraceComplete = false;
 static bool mqttAnnouncedEth = false;
 static bool mqttAnnouncedGsm = false;
 static bool mqttDisabledWarned = false;
 static volatile bool mqttFastCommandPending = false;
 static uint32_t mqttFastModeUntilMs = 0;
+static bool mqttFastModeActive = false;
 static bool modemSerialReady = false;
 static bool modemReady = false;
 static bool modemPowerKickDone = false;
 static bool simPinChecked = false;
+static bool simPinUnlockBlocked = false;
 static bool gsmNetworkReady = false;
 static bool gsmDataReady = false;
 static uint32_t gsmLastTryMs = 0;
@@ -306,9 +314,14 @@ static OneWire oneWire(PIN_ONEWIRE);
 static DallasTemperature tempSensors(&oneWire);
 static DeviceAddress tempAddr[TEMP_MAX_SENSORS];
 static float tempC[TEMP_MAX_SENSORS];
+static bool tempValid[TEMP_MAX_SENSORS] = {false};
+static bool tempSampled[TEMP_MAX_SENSORS] = {false};
+static uint32_t tempSampleMs[TEMP_MAX_SENSORS] = {0};
 static float lastTempPub[TEMP_MAX_SENSORS];
 static uint8_t tempCount = 0;
 static uint32_t lastTempReadMs = 0;
+static bool tempConversionPending = false;
+static uint32_t tempConversionStartedMs = 0;
 
 static uint8_t shuttersLimit();
 
@@ -320,6 +333,7 @@ static float dhtHum = NAN;
 static float lastDhtHumPub = NAN;
 static bool dhtCheckDone = false;
 static uint32_t dhtNextProbeMs = 0;
+static bool dhtProbeScheduled = false;
 
 
 struct AuthConfig {
@@ -342,6 +356,7 @@ bool inputs[MAX_INPUTS] = {0};
 bool prevInputs[MAX_INPUTS] = {0};
 bool rawInputs[MAX_INPUTS] = {0};
 uint32_t inputChangeMs[MAX_INPUTS] = {0};
+bool inputChangePending[MAX_INPUTS] = {false};
 static const uint32_t INPUT_DEBOUNCE_MS = 20;
 bool virtualInputs[MAX_INPUTS] = {0};
 bool lastVirtualPub[MAX_INPUTS] = {0};
@@ -350,6 +365,7 @@ static const uint32_t VINPUT_DEFAULT_PULSE_MS = 250;
 VirtualInputType virtualInputTypes[MAX_INPUTS] = {VIN_SWITCH};
 uint32_t virtualInputPulseMs[MAX_INPUTS] = {0};
 uint32_t virtualInputPulseUntilMs[MAX_INPUTS] = {0};
+bool virtualInputPulseActive[MAX_INPUTS] = {false};
 bool combinedInputs[MAX_INPUTS] = {0};
 bool prevCombinedInputs[MAX_INPUTS] = {0};
 
@@ -358,6 +374,9 @@ bool relayFromSimple[MAX_RELAYS] = {0};
 bool relayFromShutter[MAX_RELAYS] = {0};
 
 uint8_t pcaOutCache[PCA_MAX_MODULES] = {0};
+bool pcaOutputsVerified[PCA_MAX_MODULES] = {false};
+uint8_t pcaWrittenOutputs[PCA_MAX_MODULES] = {0};
+uint32_t pcaOutputFailures[PCA_MAX_MODULES] = {0};
 bool pcaPresent[PCA_MAX_MODULES] = {false};
 bool pcaAlive[PCA_MAX_MODULES] = {false};
 uint8_t pcaFailCount[PCA_MAX_MODULES] = {0};
@@ -375,6 +394,7 @@ bool lastBlePub = false;
 // Mémoire toggle + pulse pour règles simples
 bool toggleState[MAX_RELAYS] = {0};
 uint32_t pulseUntilMs[MAX_RELAYS] = {0};
+bool pulseActive[MAX_RELAYS] = {false};
 
 // Delay state pour règles simples
 bool pendingTarget[MAX_RELAYS] = {0};
@@ -416,7 +436,7 @@ static bool i2cWriteReg8(uint8_t addr, uint8_t reg, uint8_t val) {
 // ===============================================================
 // LittleFS helpers
 // ===============================================================
-static String readFile(const char* path) {
+static String readRawFile(const char* path) {
   if (!LittleFS.exists(path)) return "";
   File f = LittleFS.open(path, "r");
   if(!f) return "";
@@ -425,12 +445,84 @@ static String readFile(const char* path) {
   return s;
 }
 
-static bool writeFile(const char* path, const String& data) {
-  File f = LittleFS.open(path, "w");
-  if(!f) return false;
-  f.print(data);
+static const char* CONFIG_FILES[] = {
+  "/net.json", "/mqtt.json", "/rules.json", "/auth.json", "/wifi.json", "/ble.json"
+};
+static const char* SETTINGS_FILE = "/settings.json";
+
+static bool isConfigFile(const char* path) {
+  for (const char* name : CONFIG_FILES) if (strcmp(path, name) == 0) return true;
+  return false;
+}
+
+static bool atomicWriteJson(const char* path, const String& data) {
+  JsonDocument checked;
+  if (deserializeJson(checked, data)) return false;
+  String staged = String(path) + ".tmp";
+  File f = LittleFS.open(staged, "w");
+  if (!f) return false;
+  size_t written = f.write((const uint8_t*)data.c_str(), data.length());
+  f.flush();
   f.close();
+  if (written != data.length() || readRawFile(staged.c_str()) != data) {
+    LittleFS.remove(staged);
+    return false;
+  }
+  // LittleFS rename replaces the old file atomically, including across reboot.
+  if (!LittleFS.rename(staged.c_str(), path)) {
+    LittleFS.remove(staged);
+    return false;
+  }
   return true;
+}
+
+static bool loadSettingsDocument(JsonDocument& doc) {
+  if (LittleFS.exists(SETTINGS_FILE)) {
+    if (deserializeJson(doc, readRawFile(SETTINGS_FILE))) return false;
+    return doc["schema"].as<int>() == 1 && doc["files"].is<JsonObject>();
+  }
+  doc["schema"] = 1;
+  JsonObject files = doc["files"].to<JsonObject>();
+  // Migrate legacy files on the first successful save, without deleting them.
+  for (const char* path : CONFIG_FILES) {
+    String text = readRawFile(path);
+    if (text.length() == 0) continue;
+    JsonDocument config;
+    if (deserializeJson(config, text) || !config.is<JsonObject>()) return false;
+    files[path].set(config.as<JsonObject>());
+  }
+  return true;
+}
+
+static String readFile(const char* path) {
+  if (!isConfigFile(path) || !LittleFS.exists(SETTINGS_FILE)) return readRawFile(path);
+  JsonDocument doc;
+  if (!loadSettingsDocument(doc)) return "";
+  String out;
+  if (!doc["files"][path].isNull()) serializeJson(doc["files"][path], out);
+  return out;
+}
+
+struct ConfigFileUpdate { const char* path; String data; };
+
+static bool commitConfigFiles(const ConfigFileUpdate* updates, size_t count) {
+  JsonDocument settings;
+  if (!loadSettingsDocument(settings)) return false;
+  for (size_t i = 0; i < count; i++) {
+    JsonDocument config;
+    if (!isConfigFile(updates[i].path) || deserializeJson(config, updates[i].data) ||
+        !config.is<JsonObject>()) return false;
+    settings["files"][updates[i].path].set(config.as<JsonObject>());
+  }
+  String out;
+  if (serializeJson(settings, out) == 0) return false;
+  return atomicWriteJson(SETTINGS_FILE, out);
+}
+
+static bool writeFile(const char* path, const String& data) {
+  if (!isConfigFile(path)) return atomicWriteJson(path, data);
+  const ConfigFileUpdate update = {path, data};
+  return commitConfigFiles(&update, 1);
 }
 
 // ===============================================================
@@ -446,12 +538,12 @@ static String defaultWifiSsid() {
   return String(buf);
 }
 
-static void wifiCfgToJson(String &out) {
+static void wifiCfgToJson(String &out, const WifiConfig& cfg = wifiCfg) {
   static JsonDocument doc;
   doc.clear();
-  doc["enabled"] = wifiCfg.enabled ? 1 : 0;
-  doc["ssid"] = wifiCfg.ssid;
-  doc["pass"] = wifiCfg.pass;
+  doc["enabled"] = cfg.enabled ? 1 : 0;
+  doc["ssid"] = cfg.ssid;
+  doc["pass"] = cfg.pass;
   doc["ap"] = wifiApOn ? 1 : 0;
   doc["ip"] = wifiApOn ? WiFi.softAPIP().toString() : "";
   doc["eth_link"] = (Ethernet.linkStatus()==LinkON) ? 1 : 0;
@@ -470,7 +562,7 @@ static bool loadWifiCfg(){
     wifiCfg.enabled = true;
     wifiCfg.ssid = defaultWifiSsid();
     wifiCfg.pass = String(WIFI_DEFAULT_PASS);
-    saveWifiCfg();
+    if (!saveWifiCfg()) { Serial.println("[WIFI] default configuration could not be persisted"); return false; }
     Serial.println("[WIFI] created default /wifi.json");
     return true;
   }
@@ -554,7 +646,7 @@ static bool loadBleCfg(){
   String s = readFile("/ble.json");
   if(s.length() == 0){
     bleEnabled = true;
-    saveBleCfg();
+    if (!saveBleCfg()) { Serial.println("[BLE] default configuration could not be persisted"); return false; }
     Serial.println("[BLE] created default /ble.json");
     return true;
   }
@@ -576,7 +668,25 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
   }
   void onDisconnect(NimBLEServer* s) override {
     bleClientConnected = false;
+    if (bleCommandQueue) xQueueReset(bleCommandQueue);
     NimBLEDevice::startAdvertising();
+  }
+};
+
+class BleCommandCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic) override {
+    const std::string value = characteristic->getValue();
+    BleCommand command{};
+    if (!parseBleCommand(value.data(), value.size(), command)) {
+      characteristic->setValue("ERROR:invalid command");
+      return;
+    }
+    // The BLE task must not modify rule or output state concurrently with loop().
+    // Publish PENDING first so the loop's final result cannot be overwritten.
+    characteristic->setValue("PENDING");
+    if (!bleCommandQueue || xQueueSend(bleCommandQueue, &command, 0) != pdTRUE) {
+      characteristic->setValue("ERROR:busy");
+    }
   }
 };
 
@@ -599,6 +709,15 @@ static void initBle(){
   );
   bleStateChar->setValue("{}");
   bleStateReadChar->setValue("{}");
+  bleCommandQueue = xQueueCreate(1, sizeof(BleCommand));
+  if (bleCommandQueue) {
+    const String commandUuid = "6E400002-B5A3-F393-E0A9-" + macHex12Upper();
+    bleCommandChar = svc->createCharacteristic(
+      commandUuid.c_str(), NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ
+    );
+    bleCommandChar->setCallbacks(new BleCommandCallbacks());
+    bleCommandChar->setValue("IDLE");
+  }
   svc->start();
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(bleServiceUuid.c_str());
@@ -660,11 +779,11 @@ static void setBleEnabled(bool en){
 }
 
 // Auth config (LittleFS)
-static void authCfgToJson(String &out){
+static void authCfgToJson(String &out, const AuthConfig& cfg = authCfg){
   static JsonDocument doc;
   doc.clear();
-  doc["user"] = authCfg.user;
-  doc["pass"] = authCfg.pass;
+  doc["user"] = cfg.user;
+  doc["pass"] = cfg.pass;
   serializeJsonPretty(doc, out);
 }
 
@@ -677,7 +796,7 @@ static bool saveAuthCfg(){
 static bool loadAuthCfg(){
   String s = readFile("/auth.json");
   if(s.length() == 0){
-    saveAuthCfg();
+    if (!saveAuthCfg()) { Serial.println("[AUTH] default configuration could not be persisted"); return false; }
     Serial.println("[AUTH] created default /auth.json");
     return true;
   }
@@ -715,11 +834,23 @@ static bool factoryResetHeld(){
   return true;
 }
 
+static bool identificationActive = false;
+static uint32_t identificationUntilMs = 0;
+
+static void startIdentification(){
+  identificationActive = true;
+  identificationUntilMs = millis() + 10000;
+}
+
 static void heartbeatTick(){
   static uint32_t lastHb = 0;
   static bool hbOn = false;
   uint32_t now = millis();
-  if(now - lastHb >= 1000){
+  if(identificationActive && deadlineReached(now, identificationUntilMs)) {
+    identificationActive = false;
+  }
+  const uint32_t intervalMs = identificationActive ? 100 : 1000;
+  if(now - lastHb >= intervalMs){
     lastHb = now;
     hbOn = !hbOn;
     digitalWrite(PIN_LED, hbOn ? 1 : 0);
@@ -735,6 +866,8 @@ static void logFactoryPinState(){
 static void doFactoryReset(){
   Serial.println("[FACTORY] button held 10s -> reset config");
   const char* files[] = {"/net.json", "/mqtt.json", "/rules.json", "/auth.json", "/wifi.json", "/ble.json"};
+  LittleFS.remove(SETTINGS_FILE);
+  LittleFS.remove("/settings.json.tmp");
   for(size_t i=0;i<sizeof(files)/sizeof(files[0]);i++){
     if(LittleFS.exists(files[i])){
       LittleFS.remove(files[i]);
@@ -779,20 +912,20 @@ static bool parseIp(const String& s, IPAddress &out) {
   return true;
 }
 
-static void netCfgToJson(String &out) {
+static void netCfgToJson(String &out, const NetConfig& cfg = netCfg) {
   static JsonDocument doc;
   doc.clear();
-  doc["mode"] = netCfg.dhcp ? "dhcp" : "static";
-  if(netCfg.dhcp){
+  doc["mode"] = cfg.dhcp ? "dhcp" : "static";
+  if(cfg.dhcp){
     doc["ip"] = Ethernet.localIP().toString();
     doc["gw"] = Ethernet.gatewayIP().toString();
     doc["sn"] = Ethernet.subnetMask().toString();
     doc["dns"] = Ethernet.dnsServerIP().toString();
   } else {
-    doc["ip"] = netCfg.ip.toString();
-    doc["gw"] = netCfg.gw.toString();
-    doc["sn"] = netCfg.sn.toString();
-    doc["dns"] = netCfg.dns.toString();
+    doc["ip"] = cfg.ip.toString();
+    doc["gw"] = cfg.gw.toString();
+    doc["sn"] = cfg.sn.toString();
+    doc["dns"] = cfg.dns.toString();
   }
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -810,7 +943,7 @@ static bool saveNetCfg() {
 static bool loadNetCfg() {
   String s = readFile("/net.json");
   if (s.length() == 0) {
-    saveNetCfg();
+    if (!saveNetCfg()) { Serial.println("[NET] default configuration could not be persisted"); return false; }
     Serial.println("[NET] created default /net.json");
     return true;
   }
@@ -902,17 +1035,19 @@ static void sendFile(Client& client, const char* path, const char* contentType) 
 // PCA9538
 // ===============================================================
 static bool pcaInitModule(uint8_t addr, uint8_t &outCache) {
+  // The output register is reset to OFF during initialization; discard the old confirmation.
+  pcaOutputsVerified[addr - PCA_BASE_ADDR] = false;
   Wire.beginTransmission(addr);
   if (Wire.endTransmission(true) != 0) return false;
 
   // Invert inputs IO4..IO7 (pull-up + active-low buttons)
   if (!i2cWriteReg8(addr, REG_POL, 0xF0)) return false;
-  if (!i2cWriteReg8(addr, REG_CFG, 0xF0)) return false; // IO0..3 out, IO4..7 in
 
   // outputs off
   uint8_t outNibble = RELAY_ACTIVE_LOW ? 0x0F : 0x00;
   outCache = (outCache & 0xF0) | (outNibble & 0x0F);
   if (!i2cWriteReg8(addr, REG_OUTPUT, outCache)) return false;
+  if (!i2cWriteReg8(addr, REG_CFG, 0xF0)) return false; // Enable outputs only after OFF is loaded.
 
   return true;
 }
@@ -938,6 +1073,14 @@ static void pcaScanAndInit() {
   } else {
     pcaCount = 1; // fallback logique
   }
+  // A temporarily absent module must not truncate saved rules at boot.
+  JsonDocument storedRules;
+  if (!deserializeJson(storedRules, readFile("/rules.json")) && storedRules["relays"].is<JsonArray>()) {
+    const size_t savedCount = storedRules["relays"].as<JsonArray>().size();
+    if (savedCount >= 4 && savedCount <= MAX_RELAYS && savedCount % RELAYS_PER_MODULE == 0) {
+      pcaCount = max(pcaCount, (uint8_t)(savedCount / RELAYS_PER_MODULE));
+    }
+  }
   totalRelays = pcaCount * RELAYS_PER_MODULE;
   totalInputs = pcaCount * INPUTS_PER_MODULE;
 
@@ -948,21 +1091,48 @@ static void pcaScanAndInit() {
 }
 
 static void pcaReadInputs() {
+  static uint32_t lastMissingProbeMs[PCA_MAX_MODULES] = {0};
+  static uint32_t lastConfigCheckMs[PCA_MAX_MODULES] = {0};
   for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
     uint8_t base = m * INPUTS_PER_MODULE;
     uint8_t in = 0;
     if (!pcaPresent[m]) {
-      // try to recover: probe read even if not marked present
+      // Probe absent modules periodically, then restore all configuration registers.
+      if (millis() - lastMissingProbeMs[m] < 1000) continue;
+      lastMissingProbeMs[m] = millis();
+      if (!pcaInitModule(PCA_BASE_ADDR + m, pcaOutCache[m])) continue;
       if(!i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)){
         pcaFailCount[m] = (pcaFailCount[m] < 255) ? (uint8_t)(pcaFailCount[m] + 1) : 255;
         if(pcaFailCount[m] >= 3) pcaAlive[m] = false;
         continue;
       }
       pcaPresent[m] = true;
+      if (m >= pcaCount) Serial.printf("[PCA] module %u recovered; restart to extend configured I/O\n", m + 1);
     } else if(!i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)){
       pcaFailCount[m] = (pcaFailCount[m] < 255) ? (uint8_t)(pcaFailCount[m] + 1) : 255;
-      if(pcaFailCount[m] >= 3) pcaAlive[m] = false;
+      if(pcaFailCount[m] >= 3) {
+        pcaAlive[m] = false;
+        pcaPresent[m] = false;
+        pcaOutputsVerified[m] = false;
+        for (uint8_t i = 0; i < INPUTS_PER_MODULE; i++) rawInputs[base + i] = false;
+      }
       continue;
+    }
+    // A PCA can reset while still acknowledging its I2C address.
+    uint8_t cfg = 0, pol = 0;
+    if ((uint32_t)(millis() - lastConfigCheckMs[m]) >= 1000) {
+      lastConfigCheckMs[m] = millis();
+      if (!i2cReadReg8(PCA_BASE_ADDR + m, REG_CFG, cfg) ||
+          !i2cReadReg8(PCA_BASE_ADDR + m, REG_POL, pol) || cfg != 0xF0 || pol != 0xF0) {
+        if (!pcaInitModule(PCA_BASE_ADDR + m, pcaOutCache[m]) ||
+            !i2cReadReg8(PCA_BASE_ADDR + m, REG_INPUT, in)) {
+          pcaPresent[m] = false;
+          pcaAlive[m] = false;
+          pcaOutputsVerified[m] = false;
+          for (uint8_t i = 0; i < INPUTS_PER_MODULE; i++) rawInputs[base + i] = false;
+          continue;
+        }
+      }
     }
     pcaFailCount[m] = 0;
     pcaAlive[m] = true;
@@ -977,19 +1147,21 @@ static void debounceInputs() {
   const uint32_t now = millis();
   for (int i = 0; i < totalInputs; i++) {
     if (rawInputs[i] != inputs[i]) {
-      if (inputChangeMs[i] == 0) inputChangeMs[i] = now;
+      if (!inputChangePending[i]) { inputChangeMs[i] = now; inputChangePending[i] = true; }
       if (now - inputChangeMs[i] >= INPUT_DEBOUNCE_MS) {
         inputs[i] = rawInputs[i];
+        inputChangePending[i] = false;
         inputChangeMs[i] = 0;
       }
     } else {
+      inputChangePending[i] = false;
       inputChangeMs[i] = 0;
     }
   }
 }
 static void pcaApplyRelays() {
   for (uint8_t m = 0; m < PCA_MAX_MODULES; m++) {
-    if (!pcaPresent[m]) continue;
+    if (!pcaPresent[m]) { pcaOutputsVerified[m] = false; continue; }
     uint8_t base = m * RELAYS_PER_MODULE;
     uint8_t nibble = 0;
     for(uint8_t i=0;i<RELAYS_PER_MODULE;i++){
@@ -998,7 +1170,33 @@ static void pcaApplyRelays() {
       if(v) nibble |= (1u << i);
     }
     pcaOutCache[m] = (pcaOutCache[m] & 0xF0) | (nibble & 0x0F);
-    i2cWriteReg8(PCA_BASE_ADDR + m, REG_OUTPUT, pcaOutCache[m]);
+    const bool wasVerified = pcaOutputsVerified[m];
+    const uint8_t desiredOutput = pcaOutCache[m];
+    const bool verify = !wasVerified ||
+                        (pcaWrittenOutputs[m] & 0x0F) != (desiredOutput & 0x0F);
+    bool ok = true;
+    if (verify) {
+      uint8_t cfg = 0;
+      ok = i2cReadReg8(PCA_BASE_ADDR + m, REG_CFG, cfg);
+      if (ok && cfg != 0xF0) {
+        // A reset PCA has inputs instead of outputs. Restore it before a short
+        // pulse can expire, without waiting for the periodic register check.
+        ok = pcaInitModule(PCA_BASE_ADDR + m, pcaOutCache[m]);
+      }
+    }
+    pcaOutCache[m] = desiredOutput;
+    if (ok) ok = i2cWriteReg8(PCA_BASE_ADDR + m, REG_OUTPUT, desiredOutput);
+    if (ok && verify) {
+      uint8_t actual = 0;
+      ok = i2cReadReg8(PCA_BASE_ADDR + m, REG_OUTPUT, actual) &&
+           (actual & 0x0F) == (desiredOutput & 0x0F);
+      if (ok) pcaWrittenOutputs[m] = actual;
+    }
+    pcaOutputsVerified[m] = ok;
+    if (!ok) {
+      if (pcaOutputFailures[m] != UINT32_MAX) ++pcaOutputFailures[m];
+      if (wasVerified || pcaOutputFailures[m] == 1) Serial.printf("[PCA] module %u output write/readback failed\n", m+1);
+    }
   }
 }
 
@@ -1053,6 +1251,10 @@ static bool normalizeVirtualInputsConfig(JsonDocument &doc, String &errMsg) {
         return false;
       }
       JsonObject cfg = src[i].as<JsonObject>();
+      if ((!cfg["type"].isNull() && !cfg["type"].is<const char*>()) ||
+          (!cfg["pulse_ms"].isNull() && !cfg["pulse_ms"].is<int>())) {
+        errMsg = "virtual input type/pulse_ms invalid types"; return false;
+      }
       String type = String((const char*)(cfg["type"] | "switch"));
       type.toLowerCase();
       if(type == "switch") types[i] = VIN_SWITCH;
@@ -1092,11 +1294,14 @@ static void applyVirtualInputsConfig() {
       if(typeText == "momentary") type = VIN_MOMENTARY;
       pulseMs = (uint32_t)(cfg["pulse_ms"] | (int)VINPUT_DEFAULT_PULSE_MS);
     }
-    if(virtualInputTypes[i] != type) virtualInputs[i] = false;
+    const bool changed = virtualInputTypes[i] != type || virtualInputPulseMs[i] != pulseMs;
+    if (changed || i >= totalInputs) {
+      virtualInputs[i] = false;
+      virtualInputPulseActive[i] = false;
+      virtualInputPulseUntilMs[i] = 0;
+    }
     virtualInputTypes[i] = type;
     virtualInputPulseMs[i] = pulseMs;
-    virtualInputPulseUntilMs[i] = 0;
-    if(type == VIN_MOMENTARY) virtualInputs[i] = false;
   }
 }
 
@@ -1104,8 +1309,8 @@ static void virtualInputTick() {
   const uint32_t now = millis();
   for(int i=0;i<totalInputs;i++){
     if(virtualInputTypes[i] != VIN_MOMENTARY) continue;
-    if(virtualInputPulseUntilMs[i] != 0 &&
-       (int32_t)(now - virtualInputPulseUntilMs[i]) >= 0){
+    if(virtualInputPulseActive[i] && deadlineReached(now, virtualInputPulseUntilMs[i])){
+      virtualInputPulseActive[i] = false;
       virtualInputPulseUntilMs[i] = 0;
       virtualInputs[i] = false;
     }
@@ -1118,11 +1323,70 @@ static bool saveRulesToFS(const JsonDocument& doc) {
   return writeFile("/rules.json", out);
 }
 
+static bool validDuration(JsonVariantConst value, uint32_t maximum, uint32_t minimum = 0) {
+  return value.isNull() || (value.is<uint32_t>() && value.as<uint32_t>() >= minimum &&
+                            value.as<uint32_t>() <= maximum);
+}
+
+static bool validBinaryValue(JsonVariantConst value) {
+  return value.isNull() || value.is<bool>() ||
+         (value.is<int>() && (value.as<int>() == 0 || value.as<int>() == 1));
+}
+
+static bool validateRelayRules(JsonDocument& doc, String& err) {
+  if (!doc["relays"].is<JsonArray>() || doc["relays"].as<JsonArray>().size() != totalRelays) {
+    err = "relays array size mismatch";
+    return false;
+  }
+  for (int i = 0; i < totalRelays; i++) {
+    JsonObject rule = doc["relays"][i].as<JsonObject>();
+    JsonObject expr = rule["expr"].as<JsonObject>();
+    if (!rule || !expr || !expr["op"].is<const char*>()) {
+      err = String("relay ") + String(i + 1) + ": expression required";
+      return false;
+    }
+    const char* op = expr["op"];
+    bool unary = strcmp(op, "FOLLOW") == 0 || strcmp(op, "TOGGLE_RISE") == 0 || strcmp(op, "PULSE_RISE") == 0;
+    bool multi = strcmp(op, "AND") == 0 || strcmp(op, "OR") == 0 || strcmp(op, "XOR") == 0;
+    if (!unary && !multi && strcmp(op, "NONE") != 0) {
+      err = "unknown relay operator";
+      return false;
+    }
+    if (unary && (!expr["in"].is<int>() || expr["in"].as<int>() < 1 || expr["in"].as<int>() > totalInputs)) {
+      err = "relay input out of range";
+      return false;
+    }
+    if (multi) {
+      JsonArray ins = expr["ins"].as<JsonArray>();
+      if (!ins || ins.size() == 0 || ins.size() > totalInputs) { err = "relay inputs required"; return false; }
+      bool seen[MAX_INPUTS] = {false};
+      for (JsonVariant value : ins) {
+        if (!value.is<int>() || value.as<int>() < 1 || value.as<int>() > totalInputs || seen[value.as<int>() - 1]) {
+          err = "relay inputs invalid or duplicated";
+          return false;
+        }
+        seen[value.as<int>() - 1] = true;
+      }
+    }
+    if (!validBinaryValue(rule["invert"]) || !validDuration(rule["onDelay"], 600000) ||
+        !validDuration(rule["offDelay"], 600000) || !validDuration(rule["pulseMs"], 60000, 1) ||
+        !validDuration(expr["pulseMs"], 60000, 1)) {
+      err = "relay invert or duration invalid";
+      return false;
+    }
+    rule["invert"] = rule["invert"].isNull() ? false : rule["invert"].as<bool>();
+    if (rule["onDelay"].isNull()) rule["onDelay"] = 0;
+    if (rule["offDelay"].isNull()) rule["offDelay"] = 0;
+    if (rule["pulseMs"].isNull()) rule["pulseMs"] = 200;
+  }
+  return true;
+}
+
 static bool loadRulesFromFS() {
   String s = readFile("/rules.json");
   if(s.length() == 0){
     setDefaultRules();
-    saveRulesToFS(rulesDoc);
+    if (!saveRulesToFS(rulesDoc)) { Serial.println("[RULES] default configuration could not be persisted"); return false; }
     Serial.println("[RULES] created default /rules.json");
     return true;
   }
@@ -1132,7 +1396,14 @@ static bool loadRulesFromFS() {
   if(err){
     Serial.printf("[RULES] JSON parse error -> default (%s)\n", err.c_str());
     setDefaultRules();
-    saveRulesToFS(rulesDoc);
+    return false;
+  }
+  String validationError;
+  // Invalid relay expressions must never silently become FOLLOW on input 1.
+  if (rulesDoc["relays"].is<JsonArray>() && rulesDoc["relays"].as<JsonArray>().size() == totalRelays &&
+      !validateRelayRules(rulesDoc, validationError)) {
+    Serial.printf("[RULES] invalid: %s -> outputs disabled, stored file preserved\n", validationError.c_str());
+    setDefaultRules();
     return false;
   }
 
@@ -1162,14 +1433,17 @@ static bool loadRulesFromFS() {
 
     rulesDoc.clear();
     rulesDoc.set(newDoc);
+    if (!validateRelayRules(rulesDoc, validationError)) {
+      Serial.printf("[RULES] invalid resized rules: %s; stored file preserved\n", validationError.c_str());
+      setDefaultRules(); return false;
+    }
     String vinErr;
     if(!normalizeVirtualInputsConfig(rulesDoc, vinErr)){
       Serial.printf("[RULES] invalid virtual_inputs after resize: %s -> defaults\n", vinErr.c_str());
-      rulesDoc.remove("virtual_inputs");
-      normalizeVirtualInputsConfig(rulesDoc, vinErr);
+      setDefaultRules(); return false;
     }
     rulesDoc["version"] = 3;
-    saveRulesToFS(rulesDoc);
+    if (!saveRulesToFS(rulesDoc)) { Serial.println("[RULES] resized rules not persisted"); return false; }
     return true;
   }
   if(!rulesDoc["shutters"].is<JsonArray>()){
@@ -1181,13 +1455,14 @@ static bool loadRulesFromFS() {
   String vinErr;
   if(!normalizeVirtualInputsConfig(rulesDoc, vinErr)){
     Serial.printf("[RULES] invalid virtual_inputs: %s -> defaults\n", vinErr.c_str());
-    rulesDoc.remove("virtual_inputs");
-    normalizeVirtualInputsConfig(rulesDoc, vinErr);
+    setDefaultRules(); return false;
   }
   rulesDoc["version"] = 3;
   String rulesAfterMigration;
   serializeJson(rulesDoc, rulesAfterMigration);
-  if(rulesBeforeMigration != rulesAfterMigration) saveRulesToFS(rulesDoc);
+  if(rulesBeforeMigration != rulesAfterMigration && !saveRulesToFS(rulesDoc)) {
+    Serial.println("[RULES] migrated rules not persisted"); return false;
+  }
 
   Serial.println("[RULES] loaded /rules.json");
   return true;
@@ -1219,6 +1494,7 @@ struct ShutterRuntime {
   ShutterMove move = SH_STOP;
   uint32_t moveStartMs = 0;
   uint32_t cooldownUntilMs = 0;
+  bool cooldownActive = false;
 
   // toggle mode memory
   bool lastUpBtn = false;
@@ -1609,15 +1885,18 @@ static bool gsmEnsureData() {
   }
 
   if (!simPinChecked) {
+    if (simPinUnlockBlocked) { gsmMarkDown(); return false; }
     simPinChecked = true;
     int simStatus = modem.getSimStatus();
     Serial.printf("[GSM] SIM status=%d\n", simStatus);
 
     // Unlock SIM card with a PIN if needed
-    if (strlen(SIM_PIN) > 0 && simStatus != 3) {
+    if (strlen(SIM_PIN) > 0 && simStatus == SIM_LOCKED) {
       Serial.println("[GSM] Unlocking sim card...");
       if (!modem.simUnlock(SIM_PIN)) {
-        Serial.println("[GSM] SIM unlock failed");
+        simPinChecked = false;
+        simPinUnlockBlocked = true; // Do not exhaust the SIM PIN attempts by retrying automatically.
+        Serial.println("[GSM] SIM unlock failed; automatic PIN attempts blocked until restart");
         gsmMarkDown();
         gsmDebug1nce("sim_unlock_fail", true);
         return false;
@@ -1632,8 +1911,11 @@ static bool gsmEnsureData() {
     gsmLastCcid = ccid;
     Serial.printf("[GSM] SIM CCID=%s\n", ccid.length() ? ccid.c_str() : "-");
 
-    if (simStatus != 3) {
+    if (simStatus != SIM_READY) {
       Serial.println("[GSM] SIM not ready");
+      simPinChecked = false;
+      gsmMarkDown();
+      return false;
     }
   }
 
@@ -1690,38 +1972,38 @@ static String mqttCurrentIp() {
   return mqttCurrentIpForTransport("ethernet");
 }
 
-static void mqttCfgToJson(String &out) {
+static void mqttCfgToJson(String &out, const MqttConfig& cfg = mqttCfg) {
   static JsonDocument doc;
   doc.clear();
-  doc["enabled"] = mqttCfg.enabled ? 1 : 0;
-  doc["transport"] = normalizeMqttTransport(mqttCfg.transport);
-  doc["host"] = mqttCfg.host;
-  doc["port"] = mqttCfg.port;
-  doc["user"] = mqttCfg.user;
-  doc["pass"] = mqttCfg.pass;
-  doc["gsm_mqtt_host"] = mqttCfg.gsmMqttHost;
-  doc["gsm_mqtt_port"] = mqttCfg.gsmMqttPort;
-  doc["gsm_mqtt_user"] = mqttCfg.gsmMqttUser;
-  doc["gsm_mqtt_pass"] = mqttCfg.gsmMqttPass;
+  doc["enabled"] = cfg.enabled ? 1 : 0;
+  doc["transport"] = normalizeMqttTransport(cfg.transport);
+  doc["host"] = cfg.host;
+  doc["port"] = cfg.port;
+  doc["user"] = cfg.user;
+  doc["pass"] = cfg.pass;
+  doc["gsm_mqtt_host"] = cfg.gsmMqttHost;
+  doc["gsm_mqtt_port"] = cfg.gsmMqttPort;
+  doc["gsm_mqtt_user"] = cfg.gsmMqttUser;
+  doc["gsm_mqtt_pass"] = cfg.gsmMqttPass;
   doc["client_id"] = mqttNodeId();
   doc["device_id"] = mqttDeviceId();
-  doc["base"] = mqttCfg.base;
+  doc["base"] = cfg.base;
   doc["base_effective"] = mqttBaseTopic();
-  doc["discovery_prefix"] = mqttCfg.discoveryPrefix;
-  doc["retain"] = mqttCfg.retain ? 1 : 0;
-  doc["apn"] = mqttCfg.apn;
-  doc["gsm_user"] = mqttCfg.gsmUser;
-  doc["gsm_pass"] = mqttCfg.gsmPass;
+  doc["discovery_prefix"] = cfg.discoveryPrefix;
+  doc["retain"] = cfg.retain ? 1 : 0;
+  doc["apn"] = cfg.apn;
+  doc["gsm_user"] = cfg.gsmUser;
+  doc["gsm_pass"] = cfg.gsmPass;
   const bool ethConn = mqttEthConnectedSafe();
   const bool gsmConn = mqttGsmConnectedSafe();
   doc["connected"] = (ethConn || gsmConn) ? 1 : 0;
   doc["eth_connected"] = ethConn ? 1 : 0;
   doc["gsm_connected"] = gsmConn ? 1 : 0;
   doc["active_transport"] = mqttActiveTransportText();
-  doc["active_host"] = mqttCfg.host;
-  doc["active_port"] = mqttCfg.port;
-  doc["eth_host"] = mqttCfg.host;
-  doc["eth_port"] = mqttCfg.port;
+  doc["active_host"] = cfg.host;
+  doc["active_port"] = cfg.port;
+  doc["eth_host"] = cfg.host;
+  doc["eth_port"] = cfg.port;
   doc["gsm_host"] = mqttHostForTransport("gsm");
   doc["gsm_port"] = mqttPortForTransport("gsm");
   doc["eth_ip"] = mqttCurrentIpForTransport("ethernet");
@@ -1792,22 +2074,23 @@ static bool loadMqttCfg() {
   return true;
 }
 
-static void mqttPublishToClient(PubSubClient &client, const String& topic, const String& payload, bool retain) {
+static bool mqttPublishToClient(PubSubClient &client, const String& topic, const String& payload, bool retain) {
   if (&client == &mqttClientGsm) {
-    if (!mqttGsmConnectedSafe()) return;
+    if (!mqttGsmConnectedSafe()) return false;
   } else {
-    if (!mqttEthConnectedSafe()) return;
+    if (!mqttEthConnectedSafe()) return false;
   }
-  client.publish(topic.c_str(), payload.c_str(), retain);
+  return client.publish(topic.c_str(), payload.c_str(), retain);
 }
 
 static void mqttPublishToTransport(const String& transport, const String& topic, const String& payload, bool retain) {
   mqttPublishToClient(*mqttClientForTransport(transport), topic, payload, retain);
 }
 
-static void mqttPublish(const String& topic, const String& payload, bool retain) {
-  mqttPublishToClient(mqttClientEth, topic, payload, retain);
-  mqttPublishToClient(mqttClientGsm, topic, payload, retain);
+static bool mqttPublish(const String& topic, const String& payload, bool retain) {
+  const bool ethSent = mqttPublishToClient(mqttClientEth, topic, payload, retain);
+  const bool gsmSent = mqttPublishToClient(mqttClientGsm, topic, payload, retain);
+  return ethSent || gsmSent;
 }
 
 static void mqttPublishEthernetOnly(const String& topic, const String& payload, bool retain) {
@@ -1893,8 +2176,8 @@ static uint8_t scanOneWireTempBus() {
       break;
     }
     memcpy(tempAddr[found], addr, sizeof(DeviceAddress));
-    tempC[found] = -127.0f;
-    lastTempPub[found] = -127.0f;
+    tempC[found] = NAN;
+    lastTempPub[found] = NAN;
     Serial.printf("[TEMP] sensor #%u addr=%s\n", found + 1, tempAddrToString(tempAddr[found]).c_str());
     found++;
   }
@@ -2168,7 +2451,10 @@ static void mqttPublishDiscovery(const String& transport) {
     doc["unit_of_meas"] = "°C";
     doc["dev_cla"] = "temperature";
     doc["stat_cla"] = "measurement";
-    doc["avty_t"] = avail;
+    doc["avty_mode"] = "all";
+    JsonArray availability = doc["avty"].to<JsonArray>();
+    availability.add<JsonObject>()["t"] = avail;
+    availability.add<JsonObject>()["t"] = base + "/temp/" + String(i+1) + "/availability";
     doc["pl_avail"] = "online";
     doc["pl_not_avail"] = "offline";
     JsonObject dev = doc["dev"].to<JsonObject>();
@@ -2275,7 +2561,8 @@ static void mqttPublishStateSnapshot(const String& transport, bool controlOnly) 
 
   if (!controlOnly) {
     for (int i = 0; i < tempCount; i++) {
-      if (tempC[i] > -100.0f) {
+      mqttPublishToTransport(transport, base + "/temp/" + String(i+1) + "/availability", tempValid[i] ? "online" : "offline", true);
+      if (tempValid[i]) {
         mqttPublishToTransport(transport, base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
         lastTempPub[i] = tempC[i];
       }
@@ -2303,7 +2590,10 @@ static void mqttHandleMessage(const char* source, char* topic, byte* payload, un
   Serial.printf("[MQTT][%s] RX topic=%s payload=%s\n", source, t.c_str(), p.c_str());
 
   String base = mqttBaseTopic();
-  if (t.startsWith(base + "/relay/") && t.endsWith("/auto")) {
+  if (t == base + "/identify/set") {
+    if (p == "ON") startIdentification();
+  }
+  else if (t.startsWith(base + "/relay/") && t.endsWith("/auto")) {
     int idx = t.substring((base + "/relay/").length()).toInt();
     if (idx >= 1 && idx <= totalRelays) {
       int i = idx - 1;
@@ -2314,15 +2604,19 @@ static void mqttHandleMessage(const char* source, char* topic, byte* payload, un
     }
   }
   else if (t == base + "/wifi/ap/set") {
-    if (p == "ON") wifiCfg.enabled = true;
-    else if (p == "OFF") wifiCfg.enabled = false;
-    saveWifiCfg();
-    applyWifiCfg();
+    if (p == "ON" || p == "OFF") {
+      WifiConfig next = wifiCfg; next.enabled = p == "ON";
+      String out; wifiCfgToJson(out, next);
+      if (writeFile("/wifi.json", out)) { wifiCfg = next; applyWifiCfg(); }
+      else Serial.println("[MQTT] WiFi configuration not applied: FS failure");
+    }
   }
   else if (t == base + "/ble/set") {
-    if (p == "ON") setBleEnabled(true);
-    else if (p == "OFF") setBleEnabled(false);
-    saveBleCfg();
+    if (p == "ON" || p == "OFF") {
+      const bool next = p == "ON";
+      if (writeFile("/ble.json", next ? "{\"enabled\":1}" : "{\"enabled\":0}")) setBleEnabled(next);
+      else Serial.println("[MQTT] BLE configuration not applied: FS failure");
+    }
   }
   else if (t.startsWith(base + "/vin/") && t.endsWith("/set")) {
     int idx = t.substring((base + "/vin/").length()).toInt();
@@ -2331,10 +2625,12 @@ static void mqttHandleMessage(const char* source, char* topic, byte* payload, un
       if (virtualInputTypes[i] == VIN_MOMENTARY) {
         if (p == "PRESS" || p == "ON" || p == "TOGGLE") {
           virtualInputs[i] = true;
+          virtualInputPulseActive[i] = true;
           virtualInputPulseUntilMs[i] = millis() + virtualInputPulseMs[i];
           fastCommand = true;
         } else if (p == "OFF") {
           virtualInputs[i] = false;
+          virtualInputPulseActive[i] = false;
           virtualInputPulseUntilMs[i] = 0;
           fastCommand = true;
         }
@@ -2368,7 +2664,34 @@ static void mqttHandleMessage(const char* source, char* topic, byte* payload, un
   if (fastCommand) {
     mqttFastCommandPending = true;
     mqttFastModeUntilMs = millis() + 700;
+    mqttFastModeActive = true;
   }
+}
+
+static void bleProcessCommands() {
+  BleCommand command{};
+  if (!bleCommandQueue || !bleEnabled || !bleClientConnected ||
+      xQueueReceive(bleCommandQueue, &command, 0) != pdTRUE) return;
+  if (command.target == 'I') {
+    startIdentification();
+    bleCommandChar->setValue("OK");
+    return;
+  }
+  const bool relay = command.target == 'R';
+  const unsigned int limit = relay ? totalRelays : totalInputs;
+  if (command.index > limit) {
+    bleCommandChar->setValue("ERROR:invalid index");
+    return;
+  }
+  if (relay && reservedByShutter[command.index - 1]) {
+    bleCommandChar->setValue("ERROR:shutter relay");
+    return;
+  }
+  String topic = mqttBaseTopic() + (relay ? "/relay/" : "/vin/") + String(command.index) + "/set";
+  // Reuse the existing command semantics, including momentary inputs and AUTO.
+  mqttHandleMessage("BLE", const_cast<char*>(topic.c_str()),
+                    reinterpret_cast<byte*>(command.action), strlen(command.action));
+  bleCommandChar->setValue("OK");
 }
 
 static void mqttCallbackEth(char* topic, byte* payload, unsigned int length) {
@@ -2408,6 +2731,7 @@ static bool mqttClearRetainedCommands(PubSubClient &client) {
   }
   if (!client.publish((base + "/wifi/ap/set").c_str(), "", true)) return false;
   if (!client.publish((base + "/ble/set").c_str(), "", true)) return false;
+  if (!client.publish((base + "/identify/set").c_str(), "", true)) return false;
   return true;
 }
 
@@ -2419,6 +2743,7 @@ static void mqttSubscribeTopics(PubSubClient &client) {
   }
   client.subscribe((base + "/wifi/ap/set").c_str());
   client.subscribe((base + "/ble/set").c_str());
+  client.subscribe((base + "/identify/set").c_str());
   for (int i = 1; i <= totalInputs; i++) {
     client.subscribe((base + "/vin/" + String(i) + "/set").c_str());
   }
@@ -2573,14 +2898,50 @@ static void mqttEnsureConnected() {
   }
 }
 
+// Control changes must be published after actuation, even during the 700 ms
+// pause reserved for discovery and slower telemetry. Otherwise a 500 ms pulse
+// can switch ON then OFF without Home Assistant ever receiving either edge.
+static void mqttPublishControlStates() {
+  if (!mqttCfg.enabled || (!mqttEthConnectedSafe() && !mqttGsmConnectedSafe())) return;
+  String base = mqttBaseTopic();
+  for (int i = 0; i < totalInputs; i++) {
+    if (inputs[i] != lastInputsPub[i]) {
+      if (mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain)) lastInputsPub[i] = inputs[i];
+    }
+  }
+  for (int i = 0; i < totalInputs; i++) {
+    if (virtualInputs[i] != lastVirtualPub[i]) {
+      if (mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain)) lastVirtualPub[i] = virtualInputs[i];
+    }
+  }
+  for (int i = 0; i < totalRelays; i++) {
+    if (relays[i] != lastRelaysPub[i]) {
+      if (mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain)) lastRelaysPub[i] = relays[i];
+    }
+    if (overrideRelay[i] != lastRelayModePub[i]) {
+      if (mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain)) lastRelayModePub[i] = overrideRelay[i];
+    }
+  }
+
+  for (int s = 0; s < shuttersLimit(); s++) {
+    if (!shCfg[s].enabled) continue;
+    if ((int)shRt[s].move != lastShutterMove[s]) {
+      const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
+      if (mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain)) lastShutterMove[s] = (int)shRt[s].move;
+    }
+  }
+
+}
+
 static void mqttLoop() {
-  if (millis() < MQTT_STARTUP_GRACE_MS) {
+  if (!mqttStartupGraceComplete && millis() < MQTT_STARTUP_GRACE_MS) {
     if (!mqttStartupGraceLogged) {
       Serial.printf("[MQTT] startup grace %lus: HTTP priority\n", (unsigned long)(MQTT_STARTUP_GRACE_MS / 1000));
       mqttStartupGraceLogged = true;
     }
     return;
   }
+  mqttStartupGraceComplete = true;
 
   if (!mqttCfg.enabled) {
     if (!mqttDisabledWarned) {
@@ -2616,7 +2977,8 @@ static void mqttLoop() {
   }
 
   // Prioritize command actuation over telemetry flood.
-  if (mqttFastCommandPending || millis() < mqttFastModeUntilMs) return;
+  if (mqttFastModeActive && deadlineReached(millis(), mqttFastModeUntilMs)) mqttFastModeActive = false;
+  if (mqttFastCommandPending || mqttFastModeActive) return;
 
   if (!ethConn && !gsmConn) return;
 
@@ -2663,41 +3025,9 @@ static void mqttLoop() {
       }
     }
   }
-  for (int i = 0; i < totalInputs; i++) {
-    if (inputs[i] != lastInputsPub[i]) {
-      mqttPublish(base + "/input/" + String(i+1) + "/state", inputs[i] ? "ON" : "OFF", mqttCfg.retain);
-      lastInputsPub[i] = inputs[i];
-    }
-  }
-  for (int i = 0; i < totalInputs; i++) {
-    if (virtualInputs[i] != lastVirtualPub[i]) {
-      mqttPublish(base + "/vin/" + String(i+1) + "/state", virtualInputs[i] ? "ON" : "OFF", mqttCfg.retain);
-      lastVirtualPub[i] = virtualInputs[i];
-    }
-  }
-  for (int i = 0; i < totalRelays; i++) {
-    if (relays[i] != lastRelaysPub[i]) {
-      mqttPublish(base + "/relay/" + String(i+1) + "/state", relays[i] ? "ON" : "OFF", mqttCfg.retain);
-      lastRelaysPub[i] = relays[i];
-    }
-    if (overrideRelay[i] != lastRelayModePub[i]) {
-      mqttPublish(base + "/relay/" + String(i+1) + "/mode", relayModeText(overrideRelay[i]), mqttCfg.retain);
-      lastRelayModePub[i] = overrideRelay[i];
-    }
-  }
-
-  for (int s = 0; s < shuttersLimit(); s++) {
-    if (!shCfg[s].enabled) continue;
-    if ((int)shRt[s].move != lastShutterMove[s]) {
-      const char* st = (shRt[s].move==SH_UP ? "opening" : (shRt[s].move==SH_DOWN ? "closing" : "stopped"));
-      mqttPublish(base + "/shutter/" + String(s+1) + "/state", String(st), mqttCfg.retain);
-      lastShutterMove[s] = (int)shRt[s].move;
-    }
-  }
-
   if (ethConn) {
     for (int i = 0; i < tempCount; i++) {
-      if (fabs(tempC[i] - lastTempPub[i]) >= 0.1f) {
+      if (tempValid[i] && (isnan(lastTempPub[i]) || fabs(tempC[i] - lastTempPub[i]) >= 0.1f)) {
         mqttPublishEthernetOnly(base + "/temp/" + String(i+1) + "/state", String(tempC[i], 2), mqttCfg.retain);
         lastTempPub[i] = tempC[i];
       }
@@ -2750,12 +3080,32 @@ static bool parseShutterFromRules(JsonArray shutters, String &errMsg) {
 
   int count = (int)shutters.size();
   int limit = shuttersLimit();
-  if(count > limit) count = limit;
+  if(count > limit) { errMsg = "too many shutters"; return false; }
 
   for(int s=0; s<count; s++){
     JsonObject so = shutters[s].as<JsonObject>();
-    if(!so) continue;
+    if (shutters[s].isNull()) continue;
+    if (!so) { errMsg = "shutter must be object or null"; return false; }
 
+    const char* indices[] = {"up_in", "down_in", "up_relay", "down_relay"};
+    for (size_t j = 0; j < 4; j++) {
+      JsonVariant value = so[indices[j]];
+      int maximum = j < 2 ? totalInputs : totalRelays;
+      if (!value.isNull() && (!value.is<int>() || value.as<int>() < 1 || value.as<int>() > maximum)) {
+        errMsg = "shutter index out of range";
+        return false;
+      }
+    }
+    if (!validDuration(so["deadtime_ms"], 60000) || !validDuration(so["max_run_ms"], 600000)) {
+      errMsg = "shutter duration out of range";
+      return false;
+    }
+
+    for (const char* field : {"name", "mode", "priority"}) {
+      if (!so[field].isNull() && !so[field].is<const char*>()) {
+        errMsg = String("shutter ") + field + " must be string"; return false;
+      }
+    }
     shCfg[s].enabled = true;
     shCfg[s].name = (const char*)(so["name"] | (s==0 ? "Volet 1" : "Volet 2"));
 
@@ -2840,6 +3190,7 @@ static void shutterForceStop(int s) {
 static void shutterCommand(int s, ShutterMove req) {
   // gestion dead-time entre inversions
   uint32_t now = millis();
+  if (shRt[s].cooldownActive && deadlineReached(now, shRt[s].cooldownUntilMs)) shRt[s].cooldownActive = false;
 
   if(req == SH_STOP){
     shRt[s].move = SH_STOP;
@@ -2848,17 +3199,19 @@ static void shutterCommand(int s, ShutterMove req) {
   }
 
   // si cooldown actif, on reste STOP jusqu’à expiration
-  if(now < shRt[s].cooldownUntilMs){
+  if(shRt[s].cooldownActive && !deadlineReached(now, shRt[s].cooldownUntilMs)){
     shRt[s].move = SH_STOP;
     shutterSetOutputs(s, SH_STOP);
     return;
   }
+  shRt[s].cooldownActive = false;
 
   // si changement de sens alors qu’on bouge -> passer STOP + cooldown
   if(shRt[s].move != SH_STOP && shRt[s].move != req){
     shRt[s].move = SH_STOP;
     shutterSetOutputs(s, SH_STOP);
     shRt[s].cooldownUntilMs = now + shCfg[s].deadtime_ms;
+    shRt[s].cooldownActive = true;
     return; // la prochaine itération autorisera req après cooldown
   }
 
@@ -2948,6 +3301,7 @@ static void shutterTickOne(int s) {
 static void shutterTick() {
   for(int i=0;i<MAX_RELAYS;i++) relayFromShutter[i] = false;
   for(int s=0; s<shuttersLimit(); s++){
+    if (shRt[s].cooldownActive && deadlineReached(millis(), shRt[s].cooldownUntilMs)) shRt[s].cooldownActive = false;
     shutterTickOne(s);
   }
 }
@@ -2974,7 +3328,7 @@ static bool applyDelays(int i, bool desired, uint32_t onDelay, uint32_t offDelay
     return desired;
   }
 
-  if(millis() >= pendingDeadlineMs[i]){
+  if(deadlineReached(millis(), pendingDeadlineMs[i])){
     hasPending[i] = false;
     return desired;
   }
@@ -2982,7 +3336,7 @@ static bool applyDelays(int i, bool desired, uint32_t onDelay, uint32_t offDelay
 }
 
 static bool evalExprSimple(int relayIndex, JsonObject expr, uint32_t rulePulseMs) {
-  const char* op = expr["op"] | "FOLLOW";
+  const char* op = expr["op"] | "NONE";
 
   if(strcmp(op, "NONE")==0){
     return false;
@@ -3024,8 +3378,12 @@ static bool evalExprSimple(int relayIndex, JsonObject expr, uint32_t rulePulseMs
     }
     if(thisRise){
       pulseUntilMs[relayIndex] = millis() + pulseMs;
+      pulseActive[relayIndex] = true;
     }
-    return (millis() < pulseUntilMs[relayIndex]);
+    if (pulseActive[relayIndex] && deadlineReached(millis(), pulseUntilMs[relayIndex])) {
+      pulseActive[relayIndex] = false;
+    }
+    return pulseActive[relayIndex];
   }
 
   return false;
@@ -3039,6 +3397,7 @@ static void evalSimpleRules() {
     if(rel && i < (int)rel.size()){
       JsonObject r = rel[i].as<JsonObject>();
       JsonObject expr = r["expr"].as<JsonObject>();
+      if (!expr || !expr["op"].is<const char*>()) { relayFromSimple[i] = false; continue; }
       uint32_t pulseMs = r["pulseMs"] | 200;
       desired = evalExprSimple(i, expr, pulseMs);
 
@@ -3221,6 +3580,7 @@ static void sendText(Client& c, const String& body, const char* ctype, int code=
 }
 
 static void buildStateJson(String &out){
+  const uint32_t stateNow = millis();
   static StaticJsonDocument<4096> doc;
   doc.clear();
   doc["device_id"] = mqttDeviceId();
@@ -3228,10 +3588,13 @@ static void buildStateJson(String &out){
   JsonArray vinA = doc["virtual_inputs"].to<JsonArray>();
   JsonArray vinTypeA = doc["virtual_input_types"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
+  JsonArray outputA = doc["relay_outputs"].to<JsonArray>();
   JsonArray ovA = doc["override"].to<JsonArray>();
   JsonArray rsA = doc["reserved"].to<JsonArray>();
   JsonArray modA = doc["modules_status"].to<JsonArray>();
   JsonArray modF = doc["modules_fail"].to<JsonArray>();
+  JsonArray outputOk = doc["modules_output_ok"].to<JsonArray>();
+  JsonArray outputFails = doc["modules_output_fail"].to<JsonArray>();
 
   for(int i=0;i<totalInputs;i++){
     inA.add(inputs[i] ? 1 : 0);
@@ -3240,6 +3603,11 @@ static void buildStateJson(String &out){
   }
   for(int i=0;i<totalRelays;i++){
     reA.add(relays[i] ? 1 : 0);
+    const uint8_t module = i / RELAYS_PER_MODULE;
+    if (pcaPresent[module] && pcaOutputsVerified[module]) {
+      bool level = (pcaWrittenOutputs[module] >> (i % RELAYS_PER_MODULE)) & 1;
+      outputA.add((RELAY_ACTIVE_LOW ? !level : level) ? 1 : 0);
+    } else outputA.add(nullptr);
     ovA.add(overrideRelay[i]);
     rsA.add(reservedByShutter[i] ? 1 : 0);
   }
@@ -3247,6 +3615,8 @@ static void buildStateJson(String &out){
     const bool ok = (pcaLastOkMs[m] != 0) && (millis() - pcaLastOkMs[m] < 5000);
     modA.add(ok ? 1 : 0);
     modF.add(pcaFailCount[m]);
+    outputOk.add(pcaPresent[m] && pcaOutputsVerified[m] ? 1 : 0);
+    outputFails.add(pcaOutputFailures[m]);
   }
 
   JsonObject eth = doc["eth"].to<JsonObject>();
@@ -3279,7 +3649,7 @@ static void buildStateJson(String &out){
     sh["up_relay"] = shCfg[0].up_relay;
     sh["down_relay"] = shCfg[0].down_relay;
     sh["move"] = (shRt[0].move==SH_UP ? "up" : (shRt[0].move==SH_DOWN ? "down" : "stop"));
-    sh["cooldown_ms"] = (millis() < shRt[0].cooldownUntilMs) ? (uint32_t)(shRt[0].cooldownUntilMs - millis()) : 0;
+  sh["cooldown_ms"] = (shRt[0].cooldownActive && !deadlineReached(stateNow, shRt[0].cooldownUntilMs)) ? (uint32_t)(shRt[0].cooldownUntilMs - stateNow) : 0;
   }
 
   JsonArray shA = doc["shutters"].to<JsonArray>();
@@ -3291,7 +3661,7 @@ static void buildStateJson(String &out){
       o["up_relay"] = shCfg[s].up_relay;
       o["down_relay"] = shCfg[s].down_relay;
       o["move"] = (shRt[s].move==SH_UP ? "up" : (shRt[s].move==SH_DOWN ? "down" : "stop"));
-      o["cooldown_ms"] = (millis() < shRt[s].cooldownUntilMs) ? (uint32_t)(shRt[s].cooldownUntilMs - millis()) : 0;
+      o["cooldown_ms"] = (shRt[s].cooldownActive && !deadlineReached(stateNow, shRt[s].cooldownUntilMs)) ? (uint32_t)(shRt[s].cooldownUntilMs - stateNow) : 0;
     }
   }
 
@@ -3299,7 +3669,11 @@ static void buildStateJson(String &out){
   for(int i=0;i<tempCount;i++){
     JsonObject t = tA.add<JsonObject>();
     t["addr"] = tempAddrToString(tempAddr[i]);
-    t["c"] = tempC[i];
+    t["c"] = tempC[i]; // NaN serializes as null.
+    const bool stale = tempSampled[i] && (uint32_t)(millis() - tempSampleMs[i]) > 15000;
+    t["valid"] = tempValid[i] && !stale;
+    t["status"] = stale ? "stale" : (tempValid[i] ? "ok" : (tempSampled[i] ? "error" : "pending"));
+    if (tempSampled[i]) t["age_ms"] = (uint32_t)(millis() - tempSampleMs[i]);
   }
   if(dhtPresent && (!isnan(dhtTempC) || !isnan(dhtHum))){
     JsonObject t = tA.add<JsonObject>();
@@ -3332,6 +3706,8 @@ static void buildStateJsonBle(String &out){
   static StaticJsonDocument<1536> doc;
   doc.clear();
   doc["device_id"] = mqttDeviceId();
+  JsonArray vinA = doc["virtual_inputs"].to<JsonArray>();
+  for(int i=0;i<totalInputs;i++) vinA.add(virtualInputs[i] ? 1 : 0);
   JsonArray inA = doc["inputs"].to<JsonArray>();
   JsonArray reA = doc["relays"].to<JsonArray>();
   JsonArray ovA = doc["override"].to<JsonArray>();
@@ -3415,11 +3791,10 @@ static void sendJsonMqttCfg(Client& c){
 }
 
 static void sendJsonBackup(Client& c){
-  loadNetCfg();
-  loadMqttCfg();
 
   static JsonDocument doc;
   doc.clear();
+  doc["schema"] = 2;
   doc["rules"] = rulesDoc;
 
   // Include auxiliary settings so filesystem OTA can preserve them too.
@@ -3429,6 +3804,10 @@ static void sendJsonBackup(Client& c){
   wifi["pass"] = wifiCfg.pass;
   JsonObject ble = doc["ble"].to<JsonObject>();
   ble["enabled"] = bleEnabled ? 1 : 0;
+
+  JsonObject auth = doc["auth"].to<JsonObject>();
+  auth["user"] = authCfg.user;
+  auth["pass"] = authCfg.pass;
 
   JsonObject net = doc["net"].to<JsonObject>();
   net["mode"] = netCfg.dhcp ? "dhcp" : "static";
@@ -3463,6 +3842,7 @@ static void sendJsonBackup(Client& c){
 }
 
 static bool parseNetFromJson(JsonObject o, NetConfig &nextCfg, String &err) {
+  if (!o || !o["mode"].is<const char*>()) { err = "net.mode required"; return false; }
   const char* mode = o["mode"] | "static";
   bool dhcp = (strcmp(mode, "dhcp") == 0);
   if(!(dhcp || strcmp(mode, "static")==0)){
@@ -3496,56 +3876,65 @@ static bool parseNetFromJson(JsonObject o, NetConfig &nextCfg, String &err) {
   return true;
 }
 
-static bool applyNetFromJson(JsonObject o, String &err) {
-  NetConfig nextCfg;
-  if(!parseNetFromJson(o, nextCfg, err)) return false;
-
-  NetConfig prevCfg = netCfg;
-  netCfg = nextCfg;
-  if(!saveNetCfg()){
-    netCfg = prevCfg;
-    err = "net fs write failed";
-    return false;
+static bool parseWifiFromJson(JsonObject o, WifiConfig &nextCfg, String &err) {
+  nextCfg = wifiCfg;
+  if (!o["enabled"].isNull()) {
+    if (!validBinaryValue(o["enabled"])) { err = "wifi.enabled must be 0|1"; return false; }
+    nextCfg.enabled = o["enabled"].as<bool>();
   }
-  applyNetCfg();
+  if (!o["ssid"].isNull()) {
+    if (!o["ssid"].is<const char*>()) { err = "wifi.ssid must be a string"; return false; }
+    nextCfg.ssid = o["ssid"].as<String>();
+    if (nextCfg.ssid.length() == 0 || nextCfg.ssid.length() > 32) { err = "wifi.ssid length must be 1..32"; return false; }
+  }
+  if (!o["pass"].isNull()) {
+    if (!o["pass"].is<const char*>()) { err = "wifi.pass must be a string"; return false; }
+    nextCfg.pass = o["pass"].as<String>();
+    if (nextCfg.pass.length() < 8 || nextCfg.pass.length() > 63) { err = "wifi.pass length must be 8..63"; return false; }
+  }
+  return true;
+}
+
+static bool parseAuthFromJson(JsonObject o, AuthConfig &nextCfg, String &err) {
+  if (!o["user"].is<const char*>() || !o["pass"].is<const char*>()) { err = "auth user/pass required"; return false; }
+  nextCfg.user = o["user"].as<String>();
+  nextCfg.pass = o["pass"].as<String>();
+  if (!nextCfg.user.length() || !nextCfg.pass.length() || nextCfg.user.indexOf(':') >= 0) {
+    err = "auth user/pass required; username must not contain ':'"; return false;
+  }
   return true;
 }
 
 static bool applyWifiFromJson(JsonObject o, String &err, bool &restarting) {
   restarting = false;
-  if(o["enabled"].isNull() && o["pass"].isNull()){
-    err = "wifi.enabled or wifi.pass required";
-    return false;
+  if (o["enabled"].isNull() && o["pass"].isNull() && o["ssid"].isNull()) {
+    err = "wifi setting required"; return false;
   }
-  const String oldPass = wifiCfg.pass;
-  if(!o["enabled"].isNull()){
-    wifiCfg.enabled = (o["enabled"] | 0) ? true : false;
-  }
-  bool passChanged = false;
-  if(!o["pass"].isNull()){
-    String p = String((const char*)(o["pass"] | ""));
-    if(p.length() < 8){
-      err = "wifi.pass must be >= 8 chars";
-      return false;
-    }
-    passChanged = (p != oldPass);
-    wifiCfg.pass = p;
-  }
-  if(!saveWifiCfg()){
-    err = "wifi fs write failed";
-    return false;
-  }
-  if(passChanged && wifiCfg.enabled){
-    stopWifiAp();
-    startWifiAp();
-    restarting = true;
-  } else {
-    applyWifiCfg();
-  }
+  WifiConfig nextCfg;
+  if (!parseWifiFromJson(o, nextCfg, err)) return false;
+  String out; wifiCfgToJson(out, nextCfg);
+  if (!writeFile("/wifi.json", out)) { err = "wifi fs write failed"; return false; }
+  restarting = wifiCfg.pass != nextCfg.pass || wifiCfg.ssid != nextCfg.ssid;
+  wifiCfg = nextCfg;
+  if (restarting && wifiCfg.enabled) { stopWifiAp(); startWifiAp(); }
+  else { applyWifiCfg(); restarting = false; }
   return true;
 }
 
 static bool parseMqttFromJson(JsonObject o, MqttConfig &nextCfg, String &err) {
+  if (!o || !validBinaryValue(o["enabled"]) || !validBinaryValue(o["retain"])) {
+    err = "mqtt enabled/retain must be 0|1"; return false;
+  }
+  for (const char* key : {"host", "user", "pass", "transport", "gsm_mqtt_host", "gsm_mqtt_user", "gsm_mqtt_pass",
+                           "client_id", "base", "discovery_prefix", "apn", "gsm_user", "gsm_pass"}) {
+    if (!o[key].isNull() && !o[key].is<const char*>()) { err = String("mqtt ") + key + " must be string"; return false; }
+  }
+  for (const char* key : {"port", "gsm_mqtt_port"}) {
+    if (!o[key].isNull() && !o[key].is<int>()) { err = String("mqtt ") + key + " must be integer"; return false; }
+  }
+  if (!o["transport"].isNull() && o["transport"] != "ethernet" && o["transport"] != "gsm" && o["transport"] != "auto") {
+    err = "mqtt.transport must be ethernet|gsm|auto"; return false;
+  }
   int port = (int)(o["port"] | 1883);
   if (port < 1 || port > 65535) {
     err = "mqtt.port out of range";
@@ -3557,7 +3946,7 @@ static bool parseMqttFromJson(JsonObject o, MqttConfig &nextCfg, String &err) {
     return false;
   }
 
-  nextCfg.enabled = (o["enabled"] | 0) ? true : false;
+  nextCfg.enabled = !o["enabled"].isNull() && o["enabled"].as<bool>();
   nextCfg.transport = normalizeMqttTransport(String((const char*)(o["transport"] | "auto")));
   nextCfg.host = String((const char*)(o["host"] | "192.168.1.43"));
   nextCfg.port = (uint16_t)port;
@@ -3570,7 +3959,7 @@ static bool parseMqttFromJson(JsonObject o, MqttConfig &nextCfg, String &err) {
   nextCfg.clientId = String((const char*)(o["client_id"] | ""));
   nextCfg.base = normalizeBaseTopic(String((const char*)(o["base"] | "espr4")));
   nextCfg.discoveryPrefix = String((const char*)(o["discovery_prefix"] | "homeassistant"));
-  nextCfg.retain = (o["retain"] | 1) ? true : false;
+  nextCfg.retain = o["retain"].isNull() || o["retain"].as<bool>();
   nextCfg.apn = String((const char*)(o["apn"] | GPRS_DEFAULT_APN));
   nextCfg.gsmUser = String((const char*)(o["gsm_user"] | GPRS_DEFAULT_USER));
   nextCfg.gsmPass = String((const char*)(o["gsm_pass"] | GPRS_DEFAULT_PASS));
@@ -3588,6 +3977,11 @@ static bool parseMqttFromJson(JsonObject o, MqttConfig &nextCfg, String &err) {
 }
 
 static void mqttOnConfigApplied() {
+  // setServer alone does not replace an established socket or subscriptions.
+  mqttClientEth.disconnect();
+  if (modemSerialReady) mqttClientGsm.disconnect();
+  mqttFastCommandPending = false;
+  mqttFastModeActive = false;
   gsmMarkDown();
   modemReady = false;
   modemPowerKickDone = false;
@@ -3613,20 +4007,29 @@ static bool applyMqttFromJson(JsonObject o, String &err) {
   MqttConfig nextCfg;
   if(!parseMqttFromJson(o, nextCfg, err)) return false;
 
-  MqttConfig prevCfg = mqttCfg;
-  mqttCfg = nextCfg;
-  if(!saveMqttCfg()){
-    mqttCfg = prevCfg;
+  String out; mqttCfgToJson(out, nextCfg);
+  if(!writeFile("/mqtt.json", out)){
     err = "mqtt fs write failed";
     return false;
   }
+  mqttCfg = nextCfg;
   mqttOnConfigApplied();
   return true;
 }
 
+static String rulesRevision() {
+  String serialized; serializeJson(rulesDoc, serialized);
+  uint8_t digest[32];
+  mbedtls_sha256_ret((const uint8_t*)serialized.c_str(), serialized.length(), digest, 0);
+  char hex[65];
+  for (size_t i = 0; i < sizeof(digest); i++) snprintf(hex + 2*i, 3, "%02x", digest[i]);
+  return String(hex);
+}
+
 static void sendJsonRules(Client& c){
-  String out;
-  serializeJsonPretty(rulesDoc, out);
+  JsonDocument snapshot; snapshot.set(rulesDoc);
+  snapshot["_revision"] = rulesRevision();
+  String out; serializeJson(snapshot, out);
   sendText(c, out, "application/json");
 }
 
@@ -3768,6 +4171,7 @@ static void logConnectivityTransitions() {
 // Validation PUT /api/rules + apply shutter cfg/reservations
 // ===============================================================
 static bool validateAndApplyRulesDoc(JsonDocument &candidate, String &errMsg) {
+  if (!validateRelayRules(candidate, errMsg)) return false;
   // relays must be array size = totalRelays
   if(!candidate["relays"].is<JsonArray>() || candidate["relays"].as<JsonArray>().size()!=totalRelays){
     errMsg = String("relays must be array size ") + String(totalRelays);
@@ -3827,8 +4231,23 @@ static bool validateRulesDocNoSideEffects(JsonDocument &candidate, String &errMs
   return ok;
 }
 
-static void rebuildRuntimeFromRules() {
-  // parse shutter & reservations from current rulesDoc
+static bool sameShutterControl(const ShutterCfg& a, const ShutterCfg& b) {
+  return a.enabled == b.enabled && a.up_in == b.up_in && a.down_in == b.down_in &&
+         a.up_relay == b.up_relay && a.down_relay == b.down_relay &&
+         a.mode == b.mode && a.priority == b.priority && a.deadtime_ms == b.deadtime_ms &&
+         a.max_run_ms == b.max_run_ms;
+}
+
+static bool sameRelayControl(JsonVariantConst a, JsonVariantConst b) {
+  return a["expr"] == b["expr"] && a["invert"] == b["invert"] &&
+         a["onDelay"] == b["onDelay"] && a["offDelay"] == b["offDelay"] &&
+         a["pulseMs"] == b["pulseMs"];
+}
+
+static void rebuildRuntimeFromRules(const JsonDocument* previousRules = nullptr) {
+  ShutterCfg oldCfg[SHUTTER_MAX];
+  ShutterRuntime oldRt[SHUTTER_MAX];
+  for (int s = 0; s < SHUTTER_MAX; s++) { oldCfg[s] = shCfg[s]; oldRt[s] = shRt[s]; }
   String err;
   if(!parseShutterFromRules(rulesDoc["shutters"].as<JsonArray>(), err)){
     // si règles en flash sont invalides, on désactive le volet par sécurité
@@ -3836,6 +4255,40 @@ static void rebuildRuntimeFromRules() {
     for(int s=0; s<shuttersLimit(); s++) shCfg[s].enabled = false;
     applyReservationsFromConfig();
   }
+  bool stopOutputs = false;
+  for (int s = 0; s < shuttersLimit(); s++) {
+    if (previousRules && sameShutterControl(oldCfg[s], shCfg[s])) {
+      shRt[s] = oldRt[s];
+      continue;
+    }
+    if (oldCfg[s].enabled) {
+      // Remove the old drive before changing relay ownership or direction.
+      relays[oldCfg[s].up_relay - 1] = false;
+      relays[oldCfg[s].down_relay - 1] = false;
+      overrideRelay[oldCfg[s].up_relay - 1] = -1;
+      overrideRelay[oldCfg[s].down_relay - 1] = -1;
+      stopOutputs = true;
+    }
+    if (previousRules && shCfg[s].enabled) {
+      shRt[s].cooldownActive = true;
+      shRt[s].cooldownUntilMs = millis() + max(oldCfg[s].deadtime_ms, shCfg[s].deadtime_ms);
+    }
+  }
+  for (int i = 0; i < totalRelays; i++) {
+    bool previouslyReserved = false;
+    for (int s = 0; s < shuttersLimit(); s++) {
+      if (oldCfg[s].enabled && (oldCfg[s].up_relay == i+1 || oldCfg[s].down_relay == i+1)) previouslyReserved = true;
+    }
+    if (previousRules && previouslyReserved == reservedByShutter[i] &&
+        sameRelayControl((*previousRules)["relays"][i], rulesDoc["relays"][i])) continue;
+    toggleState[i] = false;
+    pulseActive[i] = false;
+    pulseUntilMs[i] = 0;
+    hasPending[i] = false;
+    pendingDeadlineMs[i] = 0;
+    relayFromSimple[i] = false;
+  }
+  if (stopOutputs) pcaApplyRelays();
   applyVirtualInputsConfig();
   mqttAnnouncedEth = false;
   mqttAnnouncedGsm = false;
@@ -3950,17 +4403,17 @@ static void handleHttpClient(Client& client, bool fromWifi=false){
       if(err){
         sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
       } else {
-        const char* user = tmp["user"] | "";
-        const char* pass = tmp["pass"] | "";
-        if(String(user).length() == 0 || String(pass).length() == 0){
-          sendText(client, String("{\"ok\":false,\"error\":\"user/pass required\"}"), "application/json", 400);
+        AuthConfig nextCfg; String message;
+        if(!parseAuthFromJson(tmp.as<JsonObject>(), nextCfg, message)){
+          JsonDocument e; e["ok"] = false; e["error"] = message;
+          String out; serializeJson(e,out); sendText(client,out,"application/json",400);
         } else {
-          authCfg.user = String(user);
-          authCfg.pass = String(pass);
-          if(!saveAuthCfg()){
-            sendText(client, String("{\"ok\":false,\"error\":\"fs write failed\"}"), "application/json", 500);
+          String out; authCfgToJson(out, nextCfg);
+          if(!writeFile("/auth.json", out)){
+            sendText(client, "{\"ok\":false,\"error\":\"fs write failed\"}", "application/json", 500);
           } else {
-            sendText(client, String("{\"ok\":true}"), "application/json");
+            authCfg = nextCfg;
+            sendText(client, "{\"ok\":true}", "application/json");
           }
         }
       }
@@ -3974,37 +4427,17 @@ static void handleHttpClient(Client& client, bool fromWifi=false){
     if(err){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
-      const char* mode = tmp["mode"] | "static";
-      bool dhcp = (strcmp(mode, "dhcp") == 0);
-      if(!(dhcp || strcmp(mode, "static")==0)){
-        sendText(client, String("{\"ok\":false,\"error\":\"mode must be dhcp|static\"}"), "application/json", 400);
+      NetConfig nextCfg; String message;
+      if (!parseNetFromJson(tmp.as<JsonObject>(), nextCfg, message)) {
+        JsonDocument e; e["ok"] = false; e["error"] = message;
+        String out; serializeJson(e,out); sendText(client,out,"application/json",400);
       } else {
-        if(!dhcp){
-          IPAddress ip, gw, sn, dns;
-          bool ok = true;
-          const char* ipStr = tmp["ip"] | "";
-          const char* gwStr = tmp["gw"] | "";
-          const char* snStr = tmp["sn"] | "";
-          const char* dnsStr = tmp["dns"] | "";
-          ok &= parseIp(String(ipStr), ip);
-          ok &= parseIp(String(gwStr), gw);
-          ok &= parseIp(String(snStr), sn);
-          ok &= parseIp(String(dnsStr), dns);
-          if(!ok){
-            sendText(client, String("{\"ok\":false,\"error\":\"invalid ip fields\"}"), "application/json", 400);
-            client.stop();
-            return;
-          }
-          netCfg.ip = ip;
-          netCfg.gw = gw;
-          netCfg.sn = sn;
-          netCfg.dns = dns;
-        }
-        netCfg.dhcp = dhcp;
-        if(!saveNetCfg()){
-          sendText(client, String("{\"ok\":false,\"error\":\"fs write failed\"}"), "application/json", 500);
+        String out; netCfgToJson(out, nextCfg);
+        if (!writeFile("/net.json", out)) {
+          sendText(client, "{\"ok\":false,\"error\":\"fs write failed\"}", "application/json",500);
         } else {
-          sendText(client, String("{\"ok\":true,\"applied\":true}"), "application/json");
+          netCfg = nextCfg;
+          sendText(client, "{\"ok\":true,\"applied\":true}", "application/json");
           applyNetCfg();
         }
       }
@@ -4085,89 +4518,59 @@ static void handleHttpClient(Client& client, bool fromWifi=false){
   }
   else if(method=="PUT" && path=="/api/backup"){
     if(!authed){ sendAuthRequired(client); return; }
-    String body = readBody(client, contentLen);
     JsonDocument tmp;
-    auto err = deserializeJson(tmp, body);
-    if(err){
-      sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
+    String message;
+    bool valid = !deserializeJson(tmp, readBody(client, contentLen));
+    if (!valid) message = "bad json";
+    if (valid && ((!tmp["schema"].isNull() && (!tmp["schema"].is<int>() || tmp["schema"].as<int>() != 2)) ||
+        !tmp["rules"].is<JsonObject>() || !tmp["net"].is<JsonObject>() || !tmp["mqtt"].is<JsonObject>())) {
+      valid = false; message = "unsupported backup schema or missing rules/net/mqtt";
+    }
+    JsonDocument nextRules;
+    NetConfig nextNet; MqttConfig nextMqtt; WifiConfig nextWifi = wifiCfg;
+    AuthConfig nextAuth = authCfg; bool nextBle = bleEnabled;
+    if (valid) {
+      nextRules.set(tmp["rules"]);
+      valid = validateRulesDocNoSideEffects(nextRules, message) &&
+              parseNetFromJson(tmp["net"].as<JsonObject>(), nextNet, message) &&
+              parseMqttFromJson(tmp["mqtt"].as<JsonObject>(), nextMqtt, message);
+    }
+    // Legacy backups omit auxiliary settings: preserve the current ones.
+    for (const char* key : {"wifi", "ble", "auth"}) {
+      if (valid && !tmp[key].isNull() && !tmp[key].is<JsonObject>()) {
+        valid = false; message = String(key) + " must be an object";
+      }
+      if (valid && tmp["schema"] == 2 && tmp[key].isNull()) {
+        valid = false; message = String("schema 2 requires ") + key;
+      }
+    }
+    if (valid && !tmp["wifi"].isNull()) valid = parseWifiFromJson(tmp["wifi"].as<JsonObject>(), nextWifi, message);
+    if (valid && !tmp["auth"].isNull()) valid = parseAuthFromJson(tmp["auth"].as<JsonObject>(), nextAuth, message);
+    if (valid && !tmp["ble"].isNull()) {
+      valid = !tmp["ble"]["enabled"].isNull() && validBinaryValue(tmp["ble"]["enabled"]);
+      if (valid) nextBle = tmp["ble"]["enabled"].as<bool>();
+      else message = "ble.enabled must be 0|1";
+    }
+    if (!valid) {
+      JsonDocument e; e["ok"] = false; e["error"] = message;
+      String out; serializeJson(e,out); sendText(client,out,"application/json",400);
     } else {
-      if(!tmp["rules"].is<JsonObject>() || !tmp["net"].is<JsonObject>() || !tmp["mqtt"].is<JsonObject>()){
-        sendText(client, String("{\"ok\":false,\"error\":\"backup must contain rules, net, mqtt\"}"), "application/json", 400);
+      ConfigFileUpdate updates[6];
+      updates[0].path = "/rules.json"; serializeJson(nextRules, updates[0].data);
+      updates[1].path = "/net.json"; netCfgToJson(updates[1].data, nextNet);
+      updates[2].path = "/mqtt.json"; mqttCfgToJson(updates[2].data, nextMqtt);
+      updates[3].path = "/wifi.json"; wifiCfgToJson(updates[3].data, nextWifi);
+      updates[4].path = "/auth.json"; authCfgToJson(updates[4].data, nextAuth);
+      updates[5].path = "/ble.json"; updates[5].data = nextBle ? "{\"enabled\":1}" : "{\"enabled\":0}";
+      if (!commitConfigFiles(updates, 6)) {
+        sendText(client,"{\"ok\":false,\"error\":\"fs transaction failed\"}","application/json",500);
       } else {
-        String msg, errMsg;
-        JsonDocument rulesTmp;
-        rulesTmp.set(tmp["rules"]);
-        NetConfig netNext;
-        MqttConfig mqttNext;
-        if(!validateRulesDocNoSideEffects(rulesTmp, msg)){
-          JsonDocument e;
-          e["ok"]=false; e["error"]=msg;
-          String out; serializeJson(e,out);
-          sendText(client, out, "application/json", 400);
-        } else if(!parseNetFromJson(tmp["net"].as<JsonObject>(), netNext, errMsg)){
-          sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
-        } else if(!parseMqttFromJson(tmp["mqtt"].as<JsonObject>(), mqttNext, errMsg)){
-          sendText(client, String("{\"ok\":false,\"error\":\"") + errMsg + "\"}", "application/json", 400);
-        } else {
-          // Snapshot current state for rollback in case one FS write fails.
-          JsonDocument rulesPrev;
-          rulesPrev.set(rulesDoc);
-          NetConfig netPrev = netCfg;
-          MqttConfig mqttPrev = mqttCfg;
-
-          bool ok = true;
-          String commitErr;
-
-          rulesDoc.clear();
-          rulesDoc.set(rulesTmp);
-          rebuildRuntimeFromRules();
-          if(!saveRulesToFS(rulesDoc)){
-            ok = false;
-            commitErr = "rules fs write failed";
-          }
-
-          if(ok){
-            netCfg = netNext;
-            if(!saveNetCfg()){
-              ok = false;
-              commitErr = "net fs write failed";
-            } else {
-              applyNetCfg();
-            }
-          }
-
-          if(ok){
-            mqttCfg = mqttNext;
-            if(!saveMqttCfg()){
-              ok = false;
-              commitErr = "mqtt fs write failed";
-            } else {
-              mqttOnConfigApplied();
-            }
-          }
-
-          if(!ok){
-            // Rollback all configs to keep backup restore coherent.
-            rulesDoc.clear();
-            rulesDoc.set(rulesPrev);
-            saveRulesToFS(rulesDoc);
-            rebuildRuntimeFromRules();
-
-            netCfg = netPrev;
-            saveNetCfg();
-            applyNetCfg();
-
-            mqttCfg = mqttPrev;
-            saveMqttCfg();
-            mqttOnConfigApplied();
-
-            sendText(client, String("{\"ok\":false,\"error\":\"") + commitErr + "\"}", "application/json", 500);
-          } else {
-            sendText(client, String("{\"ok\":true,\"applied\":true,\"reboot\":true}"), "application/json");
-            delay(200);
-            ESP.restart();
-          }
-        }
+        JsonDocument previous; previous.set(rulesDoc);
+        rulesDoc.set(nextRules);
+        netCfg = nextNet; mqttCfg = nextMqtt; wifiCfg = nextWifi; authCfg = nextAuth; bleEnabled = nextBle;
+        rebuildRuntimeFromRules(&previous);
+        sendText(client,"{\"ok\":true,\"applied\":true,\"reboot\":true}","application/json");
+        delay(200); ESP.restart();
       }
     }
   }
@@ -4181,20 +4584,21 @@ static void handleHttpClient(Client& client, bool fromWifi=false){
       sendText(client, String("{\"ok\":false,\"error\":\"bad json\"}"), "application/json", 400);
     } else {
       String msg;
-      if(!validateRulesDocNoSideEffects(tmp, msg)){
+      if (!tmp["_revision"].is<const char*>() || tmp["_revision"].as<String>() != rulesRevision()) {
+        sendText(client, "{\"ok\":false,\"error\":\"rules changed; reload rules before saving\"}", "application/json", 409);
+      } else if(!validateRulesDocNoSideEffects(tmp, msg)){
         JsonDocument e;
         e["ok"]=false; e["error"]=msg;
         String out; serializeJson(e,out);
         sendText(client, out, "application/json", 400);
       } else {
-        // appliquer + sauver
-        rulesDoc.clear();
-        rulesDoc.set(tmp);
-        rebuildRuntimeFromRules();
-
-        if(!saveRulesToFS(rulesDoc)){
+        tmp.remove("_revision");
+        if(!saveRulesToFS(tmp)){
           sendText(client, String("{\"ok\":false,\"error\":\"fs write failed\"}"), "application/json", 500);
         } else {
+          JsonDocument previous; previous.set(rulesDoc);
+          rulesDoc.set(tmp);
+          rebuildRuntimeFromRules(&previous);
           sendText(client, String("{\"ok\":true,\"applied\":true}"), "application/json");
         }
       }
@@ -4359,8 +4763,8 @@ void setup() {
     if (dallasCount > TEMP_MAX_SENSORS) dallasCount = TEMP_MAX_SENSORS;
     for (uint8_t i = 0; i < dallasCount; i++) {
       if (tempSensors.getAddress(tempAddr[i], i)) {
-        tempC[i] = -127.0f;
-        lastTempPub[i] = -127.0f;
+        tempC[i] = NAN;
+        lastTempPub[i] = NAN;
         tempCount++;
         Serial.printf("[TEMP] sensor #%u addr=%s (Dallas fallback)\n", tempCount, tempAddrToString(tempAddr[i]).c_str());
       }
@@ -4422,6 +4826,25 @@ void setup() {
   Serial.println("[BOOT] Ready. Open http://<IP>/");
 }
 
+static void ethernetMaintainTick() {
+  static uint32_t lastMaintainMs = 0;
+  if (!netCfg.dhcp || Ethernet.linkStatus() != LinkON || (uint32_t)(millis() - lastMaintainMs) < 1000) return;
+  lastMaintainMs = millis();
+  const IPAddress previousIp = Ethernet.localIP();
+  const int result = Ethernet.maintain();
+  if (result == 1 || result == 3) Serial.printf("[ETH] DHCP renewal/rebind failed (%d)\n", result);
+  if (result == 2 || result == 4) {
+    Serial.printf("[ETH] DHCP lease updated: %s\n", Ethernet.localIP().toString().c_str());
+    if (Ethernet.localIP() != previousIp) {
+      mqttClientEth.disconnect();
+      mqttAnnouncedEth = false;
+      lastIpPubEth = "";
+      mqttLastConnectEthMs = 0;
+      server.begin();
+    }
+  }
+}
+
 void loop() {
   // Serve HTTP first to keep UI/API responsive even if other tasks slow down.
   handleHttp();
@@ -4434,6 +4857,7 @@ void loop() {
 
   // Process MQTT before combining inputs and evaluate each edge only once.
   mqttLoop();
+  bleProcessCommands();
 
   // combine physical + virtual inputs for rules/edges
   for(int i=0;i<totalInputs;i++){
@@ -4460,24 +4884,40 @@ void loop() {
     prevCombinedInputs[k] = combinedInputs[k];
   }
 
+  mqttPublishControlStates();
+  ethernetMaintainTick();
   updateWifiState();
   heartbeatTick();
   bleTick();
 
-  // Temperature polling
-  if(millis() - lastTempReadMs > 5000){
-    lastTempReadMs = millis();
-    if(tempCount > 0){
+  // Temperature polling: conversion request and result read occur on separate ticks.
+  const uint32_t temperatureNow = millis();
+  if (tempConversionPending && (uint32_t)(temperatureNow - tempConversionStartedMs) >=
+      tempSensors.millisToWaitForConversion(tempSensors.getResolution())) {
+    tempConversionPending = false;
+    for (uint8_t i = 0; i < tempCount; i++) {
+      const float c = tempSensors.getTempC(tempAddr[i]);
+      const bool valid = !isnan(c) && c != DEVICE_DISCONNECTED_C && c >= -55.0f && c <= 125.0f;
+      if (tempValid[i] != valid) { mqttAnnouncedEth = false; mqttAnnouncedGsm = false; }
+      tempValid[i] = valid;
+      tempC[i] = valid ? c : NAN;
+      tempSampled[i] = true;
+      tempSampleMs[i] = millis();
+      if (!valid) lastTempPub[i] = NAN;
+    }
+  }
+  if ((uint32_t)(temperatureNow - lastTempReadMs) >= 5000) {
+    lastTempReadMs = temperatureNow;
+    if (tempCount > 0 && !tempConversionPending) {
       tempSensors.requestTemperatures();
-      for(uint8_t i=0;i<tempCount;i++){
-        float c = tempSensors.getTempC(tempAddr[i]);
-        tempC[i] = c;
-      }
+      tempConversionStartedMs = millis();
+      tempConversionPending = true;
     }
     // DHT reads can block when sensor is absent; once not detected, probe only occasionally.
     const uint32_t nowMs = millis();
-    const bool shouldProbeDht = dhtPresent || !dhtCheckDone || nowMs >= dhtNextProbeMs;
+    const bool shouldProbeDht = dhtPresent || !dhtCheckDone || (!dhtProbeScheduled || deadlineReached(nowMs, dhtNextProbeMs));
     if (shouldProbeDht) {
+      dhtProbeScheduled = true;
       float dhtC = dht.readTemperature();
       float dhtH = dht.readHumidity();
       if(!isnan(dhtC) || !isnan(dhtH)){
